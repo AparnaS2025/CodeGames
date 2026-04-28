@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Capacity Intelligence Dashboard</title>
+    <link rel="stylesheet" href="/static/dashboard.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Production Capacity Intelligence</p>
+        <h1>Sumo 30-Day Recommendation Dashboard</h1>
+      </div>
+      <div class="run-meta" id="runMeta">Loading report...</div>
+    </header>
+
+    <main class="dashboard-shell">
+      <section class="summary-grid" aria-label="Portfolio summary">
+        <article class="metric-tile">
+          <span class="tile-label">Production Resources</span>
+          <strong id="productionCount">-</strong>
+          <small id="totalCount">- total analyzed</small>
+        </article>
+        <article class="metric-tile tile-watch">
+          <span class="tile-label">Watchlist</span>
+          <strong id="watchlistCount">-</strong>
+          <small>early warning candidates</small>
+        </article>
+        <article class="metric-tile tile-hold">
+          <span class="tile-label">Hold</span>
+          <strong id="holdCount">-</strong>
+          <small>stable enough to observe</small>
+        </article>
+        <article class="metric-tile tile-gap">
+          <span class="tile-label">Insufficient Data</span>
+          <strong id="insufficientCount">-</strong>
+          <small>telemetry gaps to close</small>
+        </article>
+      </section>
+
+      <section class="report-band">
+        <div>
+          <p class="eyebrow">Portfolio Summary</p>
+          <p id="portfolioSummary">Loading latest scored report...</p>
+        </div>
+      </section>
+
+      <section class="workspace">
+        <aside class="filters" aria-label="Recommendation filters">
+          <label>
+            Search
+            <input id="searchInput" type="search" placeholder="customer, resource, evidence" />
+          </label>
+          <label>
+            Type
+            <select id="typeFilter">
+              <option value="">All types</option>
+              <option value="watchlist">Watchlist</option>
+              <option value="hold">Hold</option>
+              <option value="scale_up">Scale up</option>
+              <option value="scale_down">Scale down</option>
+              <option value="insufficient_data">Insufficient data</option>
+            </select>
+          </label>
+          <label>
+            Risk
+            <select id="riskFilter">
+              <option value="">All risk levels</option>
+              <option value="high">High</option>
+              <option value="medium">Medium</option>
+              <option value="low">Low</option>
+            </select>
+          </label>
+          <label>
+            Confidence
+            <select id="confidenceFilter">
+              <option value="">All confidence</option>
+              <option value="high">High</option>
+              <option value="medium">Medium</option>
+              <option value="low">Low</option>
+            </select>
+          </label>
+        </aside>
+
+        <section class="recommendations-panel" aria-label="Recommendations">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Recommendations</p>
+              <h2 id="tableTitle">Production workload review</h2>
+            </div>
+            <span class="result-count" id="resultCount">0 shown</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Resource</th>
+                  <th>Type</th>
+                  <th>Risk</th>
+                  <th>Confidence</th>
+                  <th>Evidence</th>
+                </tr>
+              </thead>
+              <tbody id="recommendationRows">
+                <tr>
+                  <td colspan="5">Loading recommendations...</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section class="detail-panel" id="detailPanel" aria-label="Recommendation detail">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">Selected Workload</p>
+            <h2 id="detailTitle">Select a row to inspect evidence</h2>
+          </div>
+          <span class="status-pill" id="detailStatus">No selection</span>
+        </div>
+        <div class="detail-grid">
+          <div>
+            <h3>Evidence</h3>
+            <ul id="detailEvidence"></ul>
+          </div>
+          <div>
+            <h3>Guardrails</h3>
+            <ul id="detailGuardrails"></ul>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script src="/static/dashboard.js"></script>
+  </body>
+</html>
