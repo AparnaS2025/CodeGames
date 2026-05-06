@@ -7,7 +7,7 @@ from pathlib import Path
 import sqlite3
 from typing import Any
 
-from app.models import AnalysisSnapshot, Recommendation, ReportSnapshot, Resource, ReviewDecision
+from app.models import AnalysisSnapshot, CapacityActionItem, Recommendation, ReportSnapshot, Resource, ReviewDecision
 
 
 class Repository:
@@ -143,6 +143,19 @@ class Repository:
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_capacity_runs_type_idempotency
                     ON capacity_runs(run_type, idempotency_key)
                     WHERE idempotency_key IS NOT NULL;
+
+                CREATE TABLE IF NOT EXISTS capacity_action_items (
+                    action_id TEXT PRIMARY KEY,
+                    recommendation_id TEXT NOT NULL,
+                    action_type TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_by TEXT NOT NULL,
+                    created_at_utc TEXT NOT NULL,
+                    payload_json TEXT NOT NULL
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_capacity_action_items_recommendation
+                    ON capacity_action_items(recommendation_id);
                 """
             )
 
@@ -656,6 +669,70 @@ class Repository:
             ).fetchone()
         return dict(row) if row else None
 
+    def save_capacity_action_item(self, item: CapacityActionItem) -> CapacityActionItem:
+        existing = self.get_capacity_action_for_recommendation(item.recommendation_id)
+        if existing:
+            return CapacityActionItem(
+                action_id=existing["action_id"],
+                recommendation_id=existing["recommendation_id"],
+                action_type=existing["action_type"],
+                status=existing["status"],
+                created_by=existing["created_by"],
+                created_at_utc=datetime.fromisoformat(existing["created_at_utc"]),
+                payload=existing["payload_json"],
+            )
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO capacity_action_items (
+                    action_id, recommendation_id, action_type, status, created_by, created_at_utc, payload_json
+                )
+                VALUES (
+                    :action_id, :recommendation_id, :action_type, :status, :created_by, :created_at_utc, :payload_json
+                );
+                """,
+                item.to_record(),
+            )
+            connection.execute(
+                """
+                UPDATE recommendations
+                SET status = 'action_created'
+                WHERE recommendation_id = ?;
+                """,
+                (item.recommendation_id,),
+            )
+        return item
+
+    def get_capacity_action_for_recommendation(self, recommendation_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT action_id, recommendation_id, action_type, status, created_by, created_at_utc, payload_json
+                FROM capacity_action_items
+                WHERE recommendation_id = ?;
+                """,
+                (recommendation_id,),
+            ).fetchone()
+        return self._capacity_action_row_to_dict(row) if row else None
+
+    def list_capacity_action_items(self, status: str | None = None) -> list[dict[str, Any]]:
+        params: list[Any] = []
+        where = ""
+        if status:
+            where = "WHERE status = ?"
+            params.append(status)
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT action_id, recommendation_id, action_type, status, created_by, created_at_utc, payload_json
+                FROM capacity_action_items
+                {where}
+                ORDER BY created_at_utc DESC;
+                """,
+                params,
+            ).fetchall()
+        return [self._capacity_action_row_to_dict(row) for row in rows]
+
     def save_report(self, report: ReportSnapshot) -> None:
         with self.connect() as connection:
             connection.execute(
@@ -775,4 +852,16 @@ class Repository:
             "request_json": json.loads(row["request_json"]),
             "result_json": json.loads(row["result_json"]) if row["result_json"] else None,
             "error_json": json.loads(row["error_json"]) if row["error_json"] else None,
+        }
+
+    @staticmethod
+    def _capacity_action_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "action_id": row["action_id"],
+            "recommendation_id": row["recommendation_id"],
+            "action_type": row["action_type"],
+            "status": row["status"],
+            "created_by": row["created_by"],
+            "created_at_utc": row["created_at_utc"],
+            "payload_json": json.loads(row["payload_json"]),
         }

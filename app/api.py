@@ -40,6 +40,7 @@ class ReviewAssistantAskRequest(BaseModel):
 class AgentAskRequest(BaseModel):
     query: str = Field(min_length=1)
     run_label: str | None = Field(default=None, min_length=1, max_length=128)
+    answer_mode: Literal["llm", "deterministic"] = "llm"
 
 
 def create_app(service: CapacityIntelligenceService) -> FastAPI:
@@ -61,6 +62,9 @@ def create_app(service: CapacityIntelligenceService) -> FastAPI:
                 "POST /api/analysis/run",
                 "GET /api/resources",
                 "GET /api/recommendations",
+                "GET /api/recommendations/{recommendation_id}/approval-pack",
+                "POST /api/recommendations/{recommendation_id}/review",
+                "GET /api/action-items",
                 "GET /api/reports/latest",
                 "GET /api/runs",
                 "GET /api/runs/{run_id}",
@@ -152,6 +156,13 @@ def create_app(service: CapacityIntelligenceService) -> FastAPI:
             raise HTTPException(status_code=404, detail="recommendation_not_found")
         return recommendation
 
+    @app.get("/api/recommendations/{recommendation_id}/approval-pack")
+    def get_approval_pack(recommendation_id: str) -> dict[str, object]:
+        approval_pack = service.prepare_approval_pack(recommendation_id)
+        if approval_pack is None:
+            raise HTTPException(status_code=404, detail="recommendation_not_found")
+        return approval_pack
+
     @app.post("/api/recommendations/{recommendation_id}/review")
     def review_recommendation(
         recommendation_id: str,
@@ -166,6 +177,10 @@ def create_app(service: CapacityIntelligenceService) -> FastAPI:
         if review is None:
             raise HTTPException(status_code=404, detail="recommendation_not_found")
         return review
+
+    @app.get("/api/action-items")
+    def list_action_items(status: str | None = Query(default=None)) -> dict[str, object]:
+        return {"action_items": service.list_capacity_action_items(status=status)}
 
     @app.get("/api/reports/latest")
     def latest_report() -> dict[str, object]:
@@ -187,6 +202,6 @@ def create_app(service: CapacityIntelligenceService) -> FastAPI:
     @app.post("/api/agent/ask")
     def ask_capacity_agent(payload: AgentAskRequest) -> dict[str, object]:
         agent = CapacityAgent(service)
-        return agent.ask(query=payload.query, run_label=payload.run_label)
+        return agent.ask(query=payload.query, run_label=payload.run_label, answer_mode=payload.answer_mode)
 
     return app

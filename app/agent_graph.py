@@ -24,6 +24,7 @@ from app.service import CapacityIntelligenceService
 
 
 AgentIntent = Literal["execute_cycle", "run_status", "review"]
+AnswerMode = Literal["llm", "deterministic"]
 
 
 class CapacityAgentState(TypedDict, total=False):
@@ -31,6 +32,8 @@ class CapacityAgentState(TypedDict, total=False):
     run_label: str
     intent: AgentIntent
     answer: str
+    use_llm: bool
+    llm_used: bool
     tool_calls: list[dict[str, Any]]
     error: str | None
 
@@ -51,12 +54,15 @@ class CapacityAgent:
             self.llm = build_agent_llm(self.service.settings)
         self.graph = self._build_graph()
 
-    def ask(self, query: str, run_label: str | None = None) -> dict[str, Any]:
+    def ask(self, query: str, run_label: str | None = None, answer_mode: AnswerMode = "llm") -> dict[str, Any]:
         effective_label = run_label or _default_run_label(query)
+        requested_mode = _normalize_answer_mode(answer_mode)
         final_state = self.graph.invoke(
             {
                 "query": query,
                 "run_label": effective_label,
+                "use_llm": requested_mode == "llm",
+                "llm_used": False,
                 "tool_calls": [],
                 "error": None,
             }
@@ -68,7 +74,10 @@ class CapacityAgent:
             "tool_calls": final_state.get("tool_calls", []),
             "source_of_truth": "capacity_langgraph_agent",
             "system_prompt_version": "capacity-agent-v1",
-            "llm_enabled": self.llm is not None,
+            "requested_answer_mode": requested_mode,
+            "answer_mode": "llm" if final_state.get("llm_used", False) else "deterministic",
+            "llm_enabled": bool(final_state.get("llm_used", False)),
+            "llm_available": self.llm is not None,
         }
 
     def _build_graph(self):
@@ -123,7 +132,7 @@ class CapacityAgent:
         _record_tool_call(tool_calls, "list_recommendations", {"count": len(recommendations)})
 
         deterministic_answer = _summarize_capacity_cycle(ingestion, analysis, report, recommendations)
-        answer = self._llm_summarize(
+        answer, llm_used = self._llm_summarize(
             state=state,
             intent="execute_cycle",
             deterministic_answer=deterministic_answer,
@@ -134,7 +143,7 @@ class CapacityAgent:
                 "recommendation_summary": _recommendation_summary(recommendations),
             },
         )
-        return {**state, "answer": answer, "tool_calls": tool_calls}
+        return {**state, "answer": answer, "llm_used": llm_used, "tool_calls": tool_calls}
 
     def _run_status_node(self, state: CapacityAgentState) -> CapacityAgentState:
         tool_calls = list(state.get("tool_calls", []))
@@ -143,6 +152,7 @@ class CapacityAgent:
             return {
                 **state,
                 "answer": "I could not find a run id in the request. Provide an ingestion-* or analysis-* run id.",
+                "llm_used": False,
                 "tool_calls": tool_calls,
             }
         run = self.tools.get_run_status(run_id)
@@ -151,13 +161,13 @@ class CapacityAgent:
             deterministic_answer = f"No persisted run was found for `{run_id}`."
         else:
             deterministic_answer = _summarize_run(run)
-        answer = self._llm_summarize(
+        answer, llm_used = self._llm_summarize(
             state=state,
             intent="run_status",
             deterministic_answer=deterministic_answer,
             facts={"run": _compact_run(run)},
         )
-        return {**state, "answer": answer, "tool_calls": tool_calls}
+        return {**state, "answer": answer, "llm_used": llm_used, "tool_calls": tool_calls}
 
     def _review_node(self, state: CapacityAgentState) -> CapacityAgentState:
         tool_calls = list(state.get("tool_calls", []))
@@ -166,20 +176,20 @@ class CapacityAgent:
             recommendation = self.tools.get_recommendation(recommendation_id)
             _record_tool_call(tool_calls, "get_recommendation", recommendation)
             deterministic_answer = _summarize_recommendation(recommendation, recommendation_id)
-            answer = self._llm_summarize(
+            answer, llm_used = self._llm_summarize(
                 state=state,
                 intent="review",
                 deterministic_answer=deterministic_answer,
                 facts={"recommendation": _compact_recommendation(recommendation)},
             )
-            return {**state, "answer": answer, "tool_calls": tool_calls}
+            return {**state, "answer": answer, "llm_used": llm_used, "tool_calls": tool_calls}
 
         report = self.tools.get_latest_report()
         _record_tool_call(tool_calls, "get_latest_report", report)
         recommendations = self.tools.list_recommendations()
         _record_tool_call(tool_calls, "list_recommendations", {"count": len(recommendations)})
         deterministic_answer = _summarize_review(report, recommendations)
-        answer = self._llm_summarize(
+        answer, llm_used = self._llm_summarize(
             state=state,
             intent="review",
             deterministic_answer=deterministic_answer,
@@ -188,7 +198,7 @@ class CapacityAgent:
                 "recommendation_summary": _recommendation_summary(recommendations),
             },
         )
-        return {**state, "answer": answer, "tool_calls": tool_calls}
+        return {**state, "answer": answer, "llm_used": llm_used, "tool_calls": tool_calls}
 
     def _llm_summarize(
         self,
@@ -196,9 +206,9 @@ class CapacityAgent:
         intent: AgentIntent,
         deterministic_answer: str,
         facts: dict[str, Any],
-    ) -> str:
-        if self.llm is None:
-            return deterministic_answer
+    ) -> tuple[str, bool]:
+        if not state.get("use_llm", True) or self.llm is None:
+            return deterministic_answer, False
 
         try:
             from langchain_core.messages import HumanMessage, SystemMessage
@@ -227,10 +237,10 @@ class CapacityAgent:
                 content = " ".join(str(part) for part in content)
             answer = str(content).strip()
             if not answer:
-                return deterministic_answer
-            return _ensure_advisory(answer)
+                return deterministic_answer, False
+            return _ensure_advisory(answer), True
         except Exception:
-            return deterministic_answer
+            return deterministic_answer, False
 
 
 def _record_tool_call(tool_calls: list[dict[str, Any]], name: str, result: Any) -> None:
@@ -361,6 +371,12 @@ def _ensure_advisory(answer: str) -> str:
     if "advisory" in lowered or "no capacity change was applied" in lowered:
         return answer
     return f"{answer} No capacity change was applied; this is advisory-only."
+
+
+def _normalize_answer_mode(answer_mode: str) -> AnswerMode:
+    if answer_mode == "deterministic":
+        return "deterministic"
+    return "llm"
 
 
 def _compact_report(report: dict[str, Any] | None) -> dict[str, Any] | None:

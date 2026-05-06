@@ -11,7 +11,7 @@ from uuid import uuid4
 from app.analysis import build_analysis_snapshot, build_portfolio_report, generate_recommendation
 from app.config import Settings
 from app.connectors import CloudWatchConnector, DatadogConnector, SourceConnector, SumoLogicConnector
-from app.models import AnalysisSnapshot, RawMetricPayload, ReportSnapshot, Resource, ReviewDecision
+from app.models import AnalysisSnapshot, CapacityActionItem, RawMetricPayload, ReportSnapshot, Resource, ReviewDecision
 from app.normalization import build_resource_resolution_index, normalize_payloads, resolve_resource_id
 from app.sample_data import default_window, sample_resources
 from app.storage import Repository
@@ -310,6 +310,32 @@ class CapacityIntelligenceService:
         return {
             **recommendation,
             "review_history": self.repository.list_reviews_for_recommendation(recommendation_id),
+            "approval_pack": self.prepare_approval_pack(recommendation_id),
+            "action_item": self.repository.get_capacity_action_for_recommendation(recommendation_id),
+        }
+
+    def prepare_approval_pack(self, recommendation_id: str) -> dict[str, Any] | None:
+        recommendation = self.repository.get_recommendation(recommendation_id)
+        if not recommendation:
+            return None
+        policy = self._approval_policy_for(recommendation)
+        action_type = self._action_type_for(recommendation)
+        return {
+            "recommendation_id": recommendation_id,
+            "resource_name": recommendation["resource_name"],
+            "recommendation_type": recommendation["recommendation_type"],
+            "approval_required": policy["approval_required"],
+            "approval_policy": policy,
+            "approval_summary": self._approval_summary_for(recommendation, policy),
+            "evidence": recommendation["evidence_json"][:5],
+            "guardrails": recommendation["guardrails_json"][:5],
+            "action_preview": {
+                "action_type": action_type,
+                "current_size": recommendation["current_size"],
+                "suggested_size": recommendation["suggested_size"],
+                "status_after_approval": "pending" if action_type else "no_action",
+                "automatic_capacity_change": False,
+            },
         }
 
     def review_recommendation(
@@ -332,6 +358,9 @@ class CapacityIntelligenceService:
             created_at_utc=datetime.now(timezone.utc),
         )
         persisted = self.repository.save_review_decision(review)
+        action_item = None
+        if decision == "approve":
+            action_item = self._create_action_item_for_approval(recommendation, reviewer)
         return {
             "review_id": persisted.review_id,
             "recommendation_id": persisted.recommendation_id,
@@ -339,7 +368,11 @@ class CapacityIntelligenceService:
             "reviewer": persisted.reviewer,
             "comment": persisted.comment,
             "created_at_utc": persisted.created_at_utc.isoformat(),
+            "action_item": action_item,
         }
+
+    def list_capacity_action_items(self, status: str | None = None) -> list[dict[str, Any]]:
+        return self.repository.list_capacity_action_items(status=status)
 
     def latest_report(self) -> dict[str, Any] | None:
         return self.repository.get_latest_report()
@@ -378,6 +411,84 @@ class CapacityIntelligenceService:
             "answer": answer,
             "source_of_truth": "stored_recommendation_state",
         }
+
+    def _create_action_item_for_approval(self, recommendation: dict[str, Any], reviewer: str) -> dict[str, Any] | None:
+        action_type = self._action_type_for(recommendation)
+        if action_type is None:
+            return None
+        item = CapacityActionItem(
+            action_id=f"action-{uuid4()}",
+            recommendation_id=recommendation["recommendation_id"],
+            action_type=action_type,
+            status="pending",
+            created_by=reviewer,
+            created_at_utc=datetime.now(timezone.utc),
+            payload={
+                "resource_id": recommendation["resource_id"],
+                "resource_name": recommendation["resource_name"],
+                "resource_type": recommendation["resource_type"],
+                "environment": recommendation["environment"],
+                "recommendation_type": recommendation["recommendation_type"],
+                "current_size": recommendation["current_size"],
+                "suggested_size": recommendation["suggested_size"],
+                "risk_level": recommendation["risk_level"],
+                "confidence": recommendation["confidence"],
+                "automatic_capacity_change": False,
+            },
+        )
+        persisted = self.repository.save_capacity_action_item(item)
+        return {
+            "action_id": persisted.action_id,
+            "recommendation_id": persisted.recommendation_id,
+            "action_type": persisted.action_type,
+            "status": persisted.status,
+            "created_by": persisted.created_by,
+            "created_at_utc": persisted.created_at_utc.isoformat(),
+            "payload_json": persisted.payload,
+        }
+
+    @staticmethod
+    def _action_type_for(recommendation: dict[str, Any]) -> str | None:
+        recommendation_type = recommendation["recommendation_type"]
+        if recommendation_type == "scale_up":
+            return "capacity_scale_up"
+        if recommendation_type == "scale_down":
+            return "capacity_scale_down"
+        if recommendation_type == "insufficient_data":
+            return "telemetry_investigation"
+        return None
+
+    @staticmethod
+    def _approval_policy_for(recommendation: dict[str, Any]) -> dict[str, Any]:
+        recommendation_type = recommendation["recommendation_type"]
+        risk = recommendation["risk_level"]
+        if recommendation_type in {"scale_up", "scale_down"} and risk in {"high", "medium"}:
+            approvers = ["application_owner", "platform_owner"]
+        elif recommendation_type in {"scale_up", "scale_down"}:
+            approvers = ["platform_owner"]
+        elif recommendation_type == "insufficient_data":
+            approvers = ["observability_owner"]
+        else:
+            approvers = ["platform_reviewer"]
+        return {
+            "approval_required": recommendation_type in {"scale_up", "scale_down", "insufficient_data"},
+            "required_approvers": approvers,
+            "risk_level": risk,
+            "reason": "Capacity-changing and telemetry-remediation recommendations require an explicit recorded decision.",
+        }
+
+    @staticmethod
+    def _approval_summary_for(recommendation: dict[str, Any], policy: dict[str, Any]) -> str:
+        savings = recommendation.get("estimated_monthly_savings")
+        savings_text = f" Estimated monthly savings: ${savings:.2f}." if savings is not None else ""
+        return (
+            f"{recommendation['resource_name']} has a {recommendation['recommendation_type']} recommendation "
+            f"with {recommendation['confidence']} confidence and {recommendation['risk_level']} risk. "
+            f"Current size is {recommendation['current_size']}; suggested size is "
+            f"{recommendation.get('suggested_size') or 'not applicable'}.{savings_text} "
+            f"Required approvers: {', '.join(policy['required_approvers'])}. "
+            "Approval creates a pending action item only; no capacity change is applied automatically."
+        )
 
     def source_health(self) -> list[dict[str, Any]]:
         issues = self.repository.list_ingestion_issues()

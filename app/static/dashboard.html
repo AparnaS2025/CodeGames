@@ -8,11 +8,11 @@
   </head>
   <body>
     <header class="topbar">
-      <div>
-        <p class="eyebrow">Production Capacity Intelligence</p>
-        <h1>Sumo 30-Day Recommendation Dashboard</h1>
+      <div class="brand-heading">
+        <img class="wk-logo" src="/static/assets/wolters-kluwer-logo.png" alt="Wolters Kluwer" />
+        <h1>Agentic CoW Capacity Intelligence</h1>
       </div>
-      <div class="run-meta" id="runMeta">Loading report...</div>
+      <img class="codegames-logo" src="/static/assets/codegames-agentic-edition-2026.png" alt="Code Games Agentic Edition 2026" />
     </header>
 
     <main class="dashboard-shell">
@@ -41,34 +41,8 @@
 
       <section class="report-band">
         <div>
-          <p class="eyebrow">Portfolio Summary</p>
+          <p class="eyebrow">Recommendation Summary</p>
           <p id="portfolioSummary">Loading latest scored report...</p>
-        </div>
-      </section>
-
-      <section class="agent-panel" aria-label="Agent assistant">
-        <div class="panel-head">
-          <div>
-            <p class="eyebrow">Agent Assistant</p>
-            <h2>Capacity workflow assistant</h2>
-          </div>
-          <span class="status-pill" id="agentStatus">Ready</span>
-        </div>
-        <div class="agent-body">
-          <div class="agent-prompts" aria-label="Suggested prompts">
-            <button type="button" data-agent-prompt="Run the full capacity cycle">Run cycle</button>
-            <button type="button" data-agent-prompt="Show me the latest report">Latest report</button>
-            <button type="button" data-agent-prompt="Summarize scale up recommendations">Scale up</button>
-          </div>
-          <label class="agent-query-label">
-            Ask
-            <textarea id="agentQuery" rows="3" placeholder="Ask for a capacity cycle, latest report, or recommendation explanation."></textarea>
-          </label>
-          <div class="agent-actions">
-            <button type="button" id="agentAskButton">Ask Agent</button>
-          </div>
-          <div class="agent-response" id="agentResponse">Agent responses will appear here.</div>
-          <div class="agent-trace" id="agentTrace" aria-label="Agent tool trace"></div>
         </div>
       </section>
 
@@ -139,22 +113,95 @@
       </section>
 
       <section class="detail-panel" id="detailPanel" aria-label="Recommendation detail">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Selected Workload</p>
+              <h2 id="detailTitle">Select a row to inspect evidence</h2>
+            </div>
+            <span class="status-pill" id="detailStatus">No selection</span>
+          </div>
+          <div class="detail-grid">
+            <div>
+              <h3>Evidence</h3>
+              <ul id="detailEvidence"></ul>
+            </div>
+            <div>
+              <h3>Guardrails</h3>
+              <ul id="detailGuardrails"></ul>
+            </div>
+          </div>
+          <div class="workflow-panel" aria-label="Approval workflow">
+            <div>
+              <h3>Approval Pack</h3>
+              <p id="approvalPack">Select a recommendation to prepare the approval pack.</p>
+            </div>
+            <div class="workflow-form">
+              <label>
+                Reviewer
+                <input id="reviewerInput" type="text" value="platform.reviewer" />
+              </label>
+              <label>
+                Comment
+                <textarea id="reviewComment" rows="2" placeholder="Optional decision note"></textarea>
+              </label>
+              <div class="workflow-actions">
+                <button type="button" data-review-decision="approve">Approve</button>
+                <button type="button" data-review-decision="reject">Reject</button>
+                <button type="button" data-review-decision="snooze">Snooze</button>
+              </div>
+              <p class="workflow-status" id="workflowStatus">No workflow decision recorded.</p>
+            </div>
+          </div>
+      </section>
+
+      <section class="agent-panel" aria-label="Agent assistant">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Agent Assistant</p>
+              <h2>Capacity workflow assistant</h2>
+            </div>
+            <div class="agent-head-actions">
+              <div class="agent-mode" role="radiogroup" aria-label="Agent answer mode">
+                <label>
+                  <input type="radio" name="agentMode" value="llm" checked />
+                  <span>LLM</span>
+                </label>
+                <label>
+                  <input type="radio" name="agentMode" value="deterministic" />
+                  <span>Python</span>
+                </label>
+              </div>
+              <span class="status-pill" id="agentStatus">Ready</span>
+            </div>
+          </div>
+          <div class="agent-body">
+            <div class="agent-prompts" aria-label="Suggested prompts">
+              <button type="button" data-agent-prompt="Run the full capacity cycle">Run cycle</button>
+              <button type="button" data-agent-prompt="Show me the latest report">Latest report</button>
+              <button type="button" data-agent-prompt="Summarize scale up recommendations">Scale up</button>
+            </div>
+            <label class="agent-query-label">
+              Ask
+              <textarea id="agentQuery" rows="3" placeholder="Ask for a capacity cycle, latest report, or recommendation explanation."></textarea>
+            </label>
+            <div class="agent-actions">
+              <button type="button" id="agentAskButton">Ask Agent</button>
+            </div>
+            <div class="agent-response" id="agentResponse">Agent responses will appear here.</div>
+            <div class="agent-trace" id="agentTrace" aria-label="Agent tool trace"></div>
+          </div>
+      </section>
+
+      <section class="actions-panel" aria-label="Capacity action items">
         <div class="panel-head">
           <div>
-            <p class="eyebrow">Selected Workload</p>
-            <h2 id="detailTitle">Select a row to inspect evidence</h2>
+            <p class="eyebrow">Workflow Actions</p>
+            <h2>Capacity action items</h2>
           </div>
-          <span class="status-pill" id="detailStatus">No selection</span>
+          <span class="result-count" id="actionItemCount">0 pending</span>
         </div>
-        <div class="detail-grid">
-          <div>
-            <h3>Evidence</h3>
-            <ul id="detailEvidence"></ul>
-          </div>
-          <div>
-            <h3>Guardrails</h3>
-            <ul id="detailGuardrails"></ul>
-          </div>
+        <div class="action-list" id="actionItems">
+          <p>No capacity action items created yet.</p>
         </div>
       </section>
     </main>

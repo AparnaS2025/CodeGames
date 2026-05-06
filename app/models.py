@@ -25,6 +25,7 @@ class RecommendationStatus(str, Enum):
     APPROVED = "approved"
     REJECTED = "rejected"
     SNOOZED = "snoozed"
+    ACTION_CREATED = "action_created"
 
 
 class ReviewDecisionType(str, Enum):
@@ -172,6 +173,28 @@ class ReviewDecision:
 
 
 @dataclass(slots=True)
+class CapacityActionItem:
+    action_id: str
+    recommendation_id: str
+    action_type: str
+    status: str
+    created_by: str
+    created_at_utc: datetime
+    payload: dict[str, Any] = field(default_factory=dict)
+
+    def to_record(self) -> dict[str, Any]:
+        return {
+            "action_id": self.action_id,
+            "recommendation_id": self.recommendation_id,
+            "action_type": self.action_type,
+            "status": self.status,
+            "created_by": self.created_by,
+            "created_at_utc": self.created_at_utc.isoformat(),
+            "payload_json": json.dumps(self.payload, sort_keys=True),
+        }
+
+
+@dataclass(slots=True)
 class ReportSnapshot:
     report_id: str
     report_type: str
@@ -189,4 +212,3 @@ class ReportSnapshot:
             "summary_text": self.summary_text,
             "details_json": json.dumps(self.details, sort_keys=True),
         }
-

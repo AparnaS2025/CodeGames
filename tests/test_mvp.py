@@ -90,15 +90,42 @@ class CapacityMvpTests(unittest.TestCase):
     def test_duplicate_review_action_is_idempotent(self) -> None:
         self.service.run_ingestion(now=FIXED_NOW)
         self.service.run_analysis(now=FIXED_NOW)
-        recommendation = self.service.list_recommendations()[0]
+        recommendation = next(
+            item for item in self.service.list_recommendations() if item["recommendation_type"] == "scale_down"
+        )
 
         first = self.service.review_recommendation(recommendation["recommendation_id"], "approve", "aparna", "safe to trial")
         second = self.service.review_recommendation(recommendation["recommendation_id"], "approve", "aparna", "safe to trial")
         detail = self.service.get_recommendation_detail(recommendation["recommendation_id"])
 
         self.assertEqual(first["review_id"], second["review_id"])
+        self.assertEqual(first["action_item"]["action_id"], second["action_item"]["action_id"])
         self.assertEqual(len(detail["review_history"]), 1)
         self.assertEqual(detail["review_history"][0]["decision"], "approve")
+        self.assertEqual(detail["status"], "action_created")
+        self.assertEqual(detail["action_item"]["status"], "pending")
+
+    def test_approval_pack_and_action_item_flow_are_exposed_by_api(self) -> None:
+        self.service.run_ingestion(now=FIXED_NOW)
+        self.service.run_analysis(now=FIXED_NOW)
+        recommendation = next(
+            item for item in self.service.list_recommendations() if item["recommendation_type"] == "scale_down"
+        )
+
+        pack = self.client.get(f"/api/recommendations/{recommendation['recommendation_id']}/approval-pack")
+        review = self.client.post(
+            f"/api/recommendations/{recommendation['recommendation_id']}/review",
+            json={"decision": "approve", "reviewer": "platform.owner", "comment": "approved for action tracking"},
+        )
+        actions = self.client.get("/api/action-items")
+
+        self.assertEqual(pack.status_code, 200)
+        self.assertTrue(pack.json()["approval_required"])
+        self.assertEqual(pack.json()["action_preview"]["action_type"], "capacity_scale_down")
+        self.assertEqual(review.status_code, 200)
+        self.assertEqual(review.json()["action_item"]["status"], "pending")
+        self.assertEqual(actions.status_code, 200)
+        self.assertEqual(actions.json()["action_items"][0]["recommendation_id"], recommendation["recommendation_id"])
 
     def test_api_exposes_execution_flow(self) -> None:
         ingestion = self.client.post("/api/ingestion/run", json={})
@@ -165,6 +192,8 @@ class CapacityMvpTests(unittest.TestCase):
 
         self.assertEqual(first.status_code, 200)
         self.assertEqual(first.json()["intent"], "execute_cycle")
+        self.assertEqual(first.json()["answer_mode"], "deterministic")
+        self.assertFalse(first.json()["llm_enabled"])
         self.assertIn("Capacity cycle completed", first.json()["answer"])
         self.assertIn("No capacity change was applied", first.json()["answer"])
         self.assertEqual(
@@ -187,6 +216,7 @@ class CapacityMvpTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["intent"], "review")
+        self.assertEqual(response.json()["answer_mode"], "deterministic")
         self.assertIn("Latest report", response.json()["answer"])
         self.assertIn("No capacity change was applied", response.json()["answer"])
         self.assertEqual(
@@ -203,6 +233,8 @@ class CapacityMvpTests(unittest.TestCase):
         response = agent.ask("Show me the latest report", run_label="fake-llm")
 
         self.assertTrue(response["llm_enabled"])
+        self.assertEqual(response["requested_answer_mode"], "llm")
+        self.assertEqual(response["answer_mode"], "llm")
         self.assertEqual(len(llm.calls), 1)
         self.assertIn("LLM summary grounded", response["answer"])
         self.assertIn("advisory-only", response["answer"])
@@ -221,6 +253,23 @@ class CapacityMvpTests(unittest.TestCase):
 
         self.assertIn("Latest report", response["answer"])
         self.assertIn("No capacity change was applied", response["answer"])
+        self.assertFalse(response["llm_enabled"])
+        self.assertEqual(response["answer_mode"], "deterministic")
+
+    def test_langgraph_agent_can_force_deterministic_answer_mode(self) -> None:
+        self.service.run_ingestion(now=FIXED_NOW)
+        self.service.run_analysis(now=FIXED_NOW)
+        llm = FakeAgentLlm("This LLM response should not be used.")
+        agent = CapacityAgent(self.service, llm=llm)
+
+        response = agent.ask("Show me the latest report", run_label="python-mode", answer_mode="deterministic")
+
+        self.assertFalse(response["llm_enabled"])
+        self.assertTrue(response["llm_available"])
+        self.assertEqual(response["requested_answer_mode"], "deterministic")
+        self.assertEqual(response["answer_mode"], "deterministic")
+        self.assertEqual(len(llm.calls), 0)
+        self.assertIn("Latest report", response["answer"])
 
     def test_agent_llm_builder_ignores_placeholder_env_values(self) -> None:
         settings = Settings()
@@ -249,12 +298,26 @@ class CapacityMvpTests(unittest.TestCase):
         script = self.client.get("/static/dashboard.js")
 
         self.assertEqual(dashboard.status_code, 200)
-        self.assertIn("Sumo 30-Day Recommendation Dashboard", dashboard.text)
+        self.assertIn("Wolters Kluwer", dashboard.text)
+        self.assertIn("/static/assets/wolters-kluwer-logo.png", dashboard.text)
+        self.assertIn("/static/assets/codegames-agentic-edition-2026.png", dashboard.text)
+        self.assertIn("Agentic CoW Capacity Intelligence", dashboard.text)
+        self.assertIn("Recommendation Summary", dashboard.text)
         self.assertIn("Agent Assistant", dashboard.text)
+        self.assertIn("name=\"agentMode\"", dashboard.text)
+        self.assertIn("Approval Pack", dashboard.text)
+        self.assertIn("Capacity action items", dashboard.text)
         self.assertEqual(stylesheet.status_code, 200)
+        self.assertIn("wk-logo", stylesheet.text)
+        self.assertIn("codegames-logo", stylesheet.text)
         self.assertIn("agent-panel", stylesheet.text)
+        self.assertIn("workspace detail agent", stylesheet.text)
+        self.assertIn("actions-panel", stylesheet.text)
         self.assertEqual(script.status_code, 200)
         self.assertIn("/api/agent/ask", script.text)
+        self.assertIn("/api/action-items", script.text)
+        self.assertIn("answer_mode", script.text)
+        self.assertIn("data-review-decision", dashboard.text)
 
     def test_sumologic_connector_uses_sample_mode_by_default(self) -> None:
         connector = SumoLogicConnector(self.settings)
