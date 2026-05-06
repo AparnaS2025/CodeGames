@@ -1,0 +1,16 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "PYTHON_ENABLE_INIT_INDEXING": "1",
+    "COW_API_BASE_URL": "http://127.0.0.1:8000",
+    "COW_MCP_BEARER_TOKEN": "replace-with-local-dev-token",
+    "AGENT_ENABLE_LLM": "false",
+    "AGENT_MAX_TOOL_ITERATIONS": "6",
+    "AZURE_OPENAI_ENDPOINT": "https://<resource>.openai.azure.com/",
+    "AZURE_OPENAI_API_KEY": "<rotated-key>",
+    "AZURE_OPENAI_DEPLOYMENT": "gpt-4.1",
+    "AZURE_OPENAI_API_VERSION": "2024-10-21"
+  }
+}

@@ -127,6 +127,22 @@ class Repository:
                     summary_text TEXT NOT NULL,
                     details_json TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS capacity_runs (
+                    run_id TEXT PRIMARY KEY,
+                    run_type TEXT NOT NULL,
+                    idempotency_key TEXT,
+                    status TEXT NOT NULL,
+                    started_at_utc TEXT NOT NULL,
+                    completed_at_utc TEXT,
+                    request_json TEXT NOT NULL,
+                    result_json TEXT,
+                    error_json TEXT
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_capacity_runs_type_idempotency
+                    ON capacity_runs(run_type, idempotency_key)
+                    WHERE idempotency_key IS NOT NULL;
                 """
             )
 
@@ -227,6 +243,127 @@ class Repository:
                     json.dumps(health, sort_keys=True),
                 ),
             )
+
+    def start_capacity_run(
+        self,
+        run_id: str,
+        run_type: str,
+        idempotency_key: str | None,
+        started_at_utc: str,
+        request: dict[str, Any],
+    ) -> dict[str, Any]:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO capacity_runs (
+                    run_id, run_type, idempotency_key, status, started_at_utc, request_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?);
+                """,
+                (
+                    run_id,
+                    run_type,
+                    idempotency_key,
+                    "running",
+                    started_at_utc,
+                    json.dumps(request, sort_keys=True),
+                ),
+            )
+        run = self.get_capacity_run(run_id)
+        if run is None:
+            raise RuntimeError(f"capacity run {run_id} was not persisted")
+        return run
+
+    def complete_capacity_run(
+        self,
+        run_id: str,
+        completed_at_utc: str,
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE capacity_runs
+                SET status = ?, completed_at_utc = ?, result_json = ?, error_json = NULL
+                WHERE run_id = ?;
+                """,
+                ("completed", completed_at_utc, json.dumps(result, sort_keys=True), run_id),
+            )
+        run = self.get_capacity_run(run_id)
+        if run is None:
+            raise RuntimeError(f"capacity run {run_id} was not found after completion")
+        return run
+
+    def fail_capacity_run(
+        self,
+        run_id: str,
+        completed_at_utc: str,
+        error: dict[str, Any],
+    ) -> dict[str, Any]:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE capacity_runs
+                SET status = ?, completed_at_utc = ?, error_json = ?
+                WHERE run_id = ?;
+                """,
+                ("failed", completed_at_utc, json.dumps(error, sort_keys=True), run_id),
+            )
+        run = self.get_capacity_run(run_id)
+        if run is None:
+            raise RuntimeError(f"capacity run {run_id} was not found after failure")
+        return run
+
+    def get_capacity_run(self, run_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT run_id, run_type, idempotency_key, status, started_at_utc, completed_at_utc,
+                       request_json, result_json, error_json
+                FROM capacity_runs
+                WHERE run_id = ?;
+                """,
+                (run_id,),
+            ).fetchone()
+        return self._capacity_run_row_to_dict(row) if row else None
+
+    def get_capacity_run_by_idempotency_key(self, run_type: str, idempotency_key: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT run_id, run_type, idempotency_key, status, started_at_utc, completed_at_utc,
+                       request_json, result_json, error_json
+                FROM capacity_runs
+                WHERE run_type = ?
+                  AND idempotency_key = ?;
+                """,
+                (run_type, idempotency_key),
+            ).fetchone()
+        return self._capacity_run_row_to_dict(row) if row else None
+
+    def list_capacity_runs(self, run_type: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
+        if run_type:
+            query = """
+                SELECT run_id, run_type, idempotency_key, status, started_at_utc, completed_at_utc,
+                       request_json, result_json, error_json
+                FROM capacity_runs
+                WHERE run_type = ?
+                ORDER BY started_at_utc DESC
+                LIMIT ?;
+            """
+            params: tuple[Any, ...] = (run_type, limit)
+        else:
+            query = """
+                SELECT run_id, run_type, idempotency_key, status, started_at_utc, completed_at_utc,
+                       request_json, result_json, error_json
+                FROM capacity_runs
+                ORDER BY started_at_utc DESC
+                LIMIT ?;
+            """
+            params = (limit,)
+        with self.connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [self._capacity_run_row_to_dict(row) for row in rows]
 
     def list_resources(
         self,
@@ -624,4 +761,18 @@ class Repository:
             "report_summary": row["report_summary"],
             "status": row["status"],
             "created_at_utc": row["created_at_utc"],
+        }
+
+    @staticmethod
+    def _capacity_run_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "run_id": row["run_id"],
+            "run_type": row["run_type"],
+            "idempotency_key": row["idempotency_key"],
+            "status": row["status"],
+            "started_at_utc": row["started_at_utc"],
+            "completed_at_utc": row["completed_at_utc"],
+            "request_json": json.loads(row["request_json"]),
+            "result_json": json.loads(row["result_json"]) if row["result_json"] else None,
+            "error_json": json.loads(row["error_json"]) if row["error_json"] else None,
         }

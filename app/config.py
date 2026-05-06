@@ -47,6 +47,12 @@ class Settings:
     sumologic_use_sample_data: bool = field(
         default_factory=lambda: os.getenv("SUMOLOGIC_USE_SAMPLE_DATA", "true").lower() != "false"
     )
+    agent_enable_llm: bool = field(default_factory=lambda: os.getenv("AGENT_ENABLE_LLM", "false").lower() == "true")
+    agent_max_tool_iterations: int = field(default_factory=lambda: int(os.getenv("AGENT_MAX_TOOL_ITERATIONS", "6")))
+    azure_openai_endpoint: str = field(default_factory=lambda: os.getenv("AZURE_OPENAI_ENDPOINT", "").rstrip("/"))
+    azure_openai_api_key: str = field(default_factory=lambda: os.getenv("AZURE_OPENAI_API_KEY", ""))
+    azure_openai_api_version: str = field(default_factory=lambda: os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21"))
+    azure_openai_deployment: str = field(default_factory=lambda: os.getenv("AZURE_OPENAI_DEPLOYMENT", ""))
     min_size_by_type: dict[str, str] = field(
         default_factory=lambda: {
             "app_service": "medium",

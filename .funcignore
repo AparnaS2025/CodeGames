@@ -1,0 +1,14 @@
+.git*
+.vs/
+.venv/
+__pycache__/
+*.pyc
+local.settings.json
+tests/
+data/
+Backup_Aparna/
+*.db
+*.db-journal
+*.sqbpro
+scratch_test.db*
+sqlite_probe_root.db*

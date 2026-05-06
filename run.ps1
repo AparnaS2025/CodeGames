@@ -6,11 +6,16 @@ param(
     [switch]$GenerateReport,
     [switch]$StrictPort,
     [switch]$RunTests,
-    [switch]$SkipServer
+    [switch]$SkipServer,
+    [string]$EnvFile = ".env",
+    [switch]$SkipEnv
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
+    $PSNativeCommandUseErrorActionPreference = $false
+}
 
 function Test-PortInUse {
     param([int]$CandidatePort)
@@ -29,8 +34,56 @@ function Get-AvailablePort {
     return $candidate
 }
 
+function Import-DotEnv {
+    param([string]$Path)
+
+    if (-not (Test-Path $Path)) {
+        Write-Host "No .env file found at $Path; continuing with current environment."
+        return
+    }
+
+    $loadedKeys = New-Object System.Collections.Generic.List[string]
+    foreach ($rawLine in [System.IO.File]::ReadLines($Path)) {
+        $line = $rawLine.Trim()
+        if (-not $line -or $line.StartsWith("#")) {
+            continue
+        }
+
+        $separatorIndex = $line.IndexOf("=")
+        if ($separatorIndex -lt 1) {
+            continue
+        }
+
+        $key = $line.Substring(0, $separatorIndex).Trim()
+        $value = $line.Substring($separatorIndex + 1).Trim()
+
+        if ($key -notmatch "^[A-Za-z_][A-Za-z0-9_]*$") {
+            continue
+        }
+
+        if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))) {
+            $value = $value.Substring(1, $value.Length - 2)
+        }
+
+        [System.Environment]::SetEnvironmentVariable($key, $value, "Process")
+        $loadedKeys.Add($key) | Out-Null
+    }
+
+    if ($loadedKeys.Count -gt 0) {
+        Write-Host "Loaded .env values: $($loadedKeys -join ', ')"
+    }
+}
+
 Push-Location $PSScriptRoot
 try {
+    if (-not $SkipEnv) {
+        $envPath = $EnvFile
+        if (-not [System.IO.Path]::IsPathRooted($envPath)) {
+            $envPath = Join-Path $PSScriptRoot $envPath
+        }
+        Import-DotEnv -Path $envPath
+    }
+
     $env:PYTHONPATH = $PSScriptRoot
 
     $defaultScoredReportDb = Join-Path $PSScriptRoot "data\sumo_live_scored_report_30d.db"
@@ -84,7 +137,7 @@ try {
     Write-Host "Dashboard: http://$ListenHost`:$Port/dashboard"
     Write-Host "API docs:  http://$ListenHost`:$Port/docs"
 
-    & python -m uvicorn app.main:app --host $ListenHost --port $Port
+    & python -m uvicorn app.main:app --host $ListenHost --port $Port 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw "Server exited with code $LASTEXITCODE."
     }

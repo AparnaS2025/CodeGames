@@ -46,6 +46,32 @@
         </div>
       </section>
 
+      <section class="agent-panel" aria-label="Agent assistant">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">Agent Assistant</p>
+            <h2>Capacity workflow assistant</h2>
+          </div>
+          <span class="status-pill" id="agentStatus">Ready</span>
+        </div>
+        <div class="agent-body">
+          <div class="agent-prompts" aria-label="Suggested prompts">
+            <button type="button" data-agent-prompt="Run the full capacity cycle">Run cycle</button>
+            <button type="button" data-agent-prompt="Show me the latest report">Latest report</button>
+            <button type="button" data-agent-prompt="Summarize scale up recommendations">Scale up</button>
+          </div>
+          <label class="agent-query-label">
+            Ask
+            <textarea id="agentQuery" rows="3" placeholder="Ask for a capacity cycle, latest report, or recommendation explanation."></textarea>
+          </label>
+          <div class="agent-actions">
+            <button type="button" id="agentAskButton">Ask Agent</button>
+          </div>
+          <div class="agent-response" id="agentResponse">Agent responses will appear here.</div>
+          <div class="agent-trace" id="agentTrace" aria-label="Agent tool trace"></div>
+        </div>
+      </section>
+
       <section class="workspace">
         <aside class="filters" aria-label="Recommendation filters">
           <label>

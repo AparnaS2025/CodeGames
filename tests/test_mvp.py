@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 import json
 import os
 import unittest
 
+import httpx
 from fastapi.testclient import TestClient
 
 from app.api import create_app
+from app.agent_graph import CapacityAgent
+from app.agent_model import build_agent_llm
 from app.config import Settings
 from app.connectors.sumologic import SUMOLOGIC_HTTP_LOG_PARSE_EXPRESSION, SumoLogicConnector
+from app.cow_api_client import CapacityApiClient, CapacityApiConfig
+from app.cow_mcp_tools import CapacityMcpTools
 from app.analysis import build_analysis_snapshot, generate_recommendation
 from app.models import NormalizedMetricPoint, RawMetricPayload, RecommendationType, Resource
 from app.normalization import build_resource_resolution_index, normalize_payloads
@@ -18,6 +24,20 @@ from app.storage import Repository
 
 
 FIXED_NOW = datetime(2026, 4, 18, 9, 0, tzinfo=timezone.utc)
+
+
+class FakeAgentLlm:
+    def __init__(self, content: str) -> None:
+        self.content = content
+        self.calls = []
+
+    def invoke(self, messages, **kwargs):
+        self.calls.append(messages)
+
+        class Response:
+            content = self.content
+
+        return Response()
 
 
 class CapacityMvpTests(unittest.TestCase):
@@ -101,6 +121,117 @@ class CapacityMvpTests(unittest.TestCase):
         self.assertEqual(answer.status_code, 200)
         self.assertIn("answer", answer.json())
 
+    def test_run_status_endpoints_show_completed_runs(self) -> None:
+        ingestion = self.client.post("/api/ingestion/run", json={"idempotency_key": "ingest-api-1"})
+        analysis = self.client.post("/api/analysis/run", json={"idempotency_key": "analysis-api-1"})
+
+        self.assertEqual(ingestion.status_code, 202)
+        self.assertEqual(analysis.status_code, 202)
+
+        run = self.client.get(f"/api/runs/{analysis.json()['run_id']}")
+        runs = self.client.get("/api/runs", params={"run_type": "analysis"})
+
+        self.assertEqual(run.status_code, 200)
+        self.assertEqual(run.json()["status"], "completed")
+        self.assertEqual(run.json()["idempotency_key"], "analysis-api-1")
+        self.assertEqual(run.json()["result_json"]["report_id"], analysis.json()["report_id"])
+        self.assertEqual(runs.status_code, 200)
+        self.assertEqual(runs.json()["runs"][0]["run_type"], "analysis")
+
+    def test_analysis_idempotency_key_prevents_duplicate_recommendations_and_reports(self) -> None:
+        self.service.run_ingestion(now=FIXED_NOW)
+        first = self.service.run_analysis(now=FIXED_NOW, idempotency_key="analysis-once")
+        recommendation_count = len(self.service.list_recommendations())
+        report_id = self.service.latest_report()["report_id"]
+
+        second = self.service.run_analysis(now=FIXED_NOW, idempotency_key="analysis-once")
+
+        self.assertEqual(second["analysis_run_id"], first["analysis_run_id"])
+        self.assertEqual(second["report_id"], first["report_id"])
+        self.assertTrue(second["idempotent_replay"])
+        self.assertEqual(len(self.service.list_recommendations()), recommendation_count)
+        self.assertEqual(self.service.latest_report()["report_id"], report_id)
+
+    def test_langgraph_agent_runs_capacity_cycle_with_idempotency(self) -> None:
+        first = self.client.post(
+            "/api/agent/ask",
+            json={"query": "Run the full capacity cycle", "run_label": "agent-cycle-once"},
+        )
+        recommendation_count = len(self.service.list_recommendations())
+        second = self.client.post(
+            "/api/agent/ask",
+            json={"query": "Run the full capacity cycle", "run_label": "agent-cycle-once"},
+        )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.json()["intent"], "execute_cycle")
+        self.assertIn("Capacity cycle completed", first.json()["answer"])
+        self.assertIn("No capacity change was applied", first.json()["answer"])
+        self.assertEqual(
+            [call["name"] for call in first.json()["tool_calls"]],
+            ["run_ingestion", "run_analysis", "get_run_status", "get_latest_report", "list_recommendations"],
+        )
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(len(self.service.list_recommendations()), recommendation_count)
+        analysis_replay = second.json()["tool_calls"][1]["result_summary"]
+        self.assertTrue(analysis_replay["idempotent_replay"])
+
+    def test_langgraph_agent_reviews_latest_report(self) -> None:
+        self.service.run_ingestion(now=FIXED_NOW)
+        self.service.run_analysis(now=FIXED_NOW)
+
+        response = self.client.post(
+            "/api/agent/ask",
+            json={"query": "Show me the latest report"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["intent"], "review")
+        self.assertIn("Latest report", response.json()["answer"])
+        self.assertIn("No capacity change was applied", response.json()["answer"])
+        self.assertEqual(
+            [call["name"] for call in response.json()["tool_calls"]],
+            ["get_latest_report", "list_recommendations"],
+        )
+
+    def test_langgraph_agent_can_use_guarded_llm_summary(self) -> None:
+        self.service.run_ingestion(now=FIXED_NOW)
+        self.service.run_analysis(now=FIXED_NOW)
+        llm = FakeAgentLlm("LLM summary grounded in stored recommendations.")
+        agent = CapacityAgent(self.service, llm=llm)
+
+        response = agent.ask("Show me the latest report", run_label="fake-llm")
+
+        self.assertTrue(response["llm_enabled"])
+        self.assertEqual(len(llm.calls), 1)
+        self.assertIn("LLM summary grounded", response["answer"])
+        self.assertIn("advisory-only", response["answer"])
+        self.assertEqual(response["tool_calls"][0]["name"], "get_latest_report")
+
+    def test_langgraph_agent_falls_back_when_llm_fails(self) -> None:
+        class FailingLlm:
+            def invoke(self, messages, **kwargs):
+                raise RuntimeError("model unavailable")
+
+        self.service.run_ingestion(now=FIXED_NOW)
+        self.service.run_analysis(now=FIXED_NOW)
+        agent = CapacityAgent(self.service, llm=FailingLlm())
+
+        response = agent.ask("Show me the latest report", run_label="failing-llm")
+
+        self.assertIn("Latest report", response["answer"])
+        self.assertIn("No capacity change was applied", response["answer"])
+
+    def test_agent_llm_builder_ignores_placeholder_env_values(self) -> None:
+        settings = Settings()
+        settings.agent_enable_llm = True
+        settings.azure_openai_endpoint = "https://capacitymcpfoundry.openai.azure.com/"
+        settings.azure_openai_api_key = "<your-rotated-key>"
+        settings.azure_openai_deployment = "gpt-4.1"
+        settings.azure_openai_api_version = "2024-10-21"
+
+        self.assertIsNone(build_agent_llm(settings))
+
     def test_root_and_health_routes_are_available(self) -> None:
         root = self.client.get("/")
         self.assertEqual(root.status_code, 200)
@@ -119,10 +250,11 @@ class CapacityMvpTests(unittest.TestCase):
 
         self.assertEqual(dashboard.status_code, 200)
         self.assertIn("Sumo 30-Day Recommendation Dashboard", dashboard.text)
+        self.assertIn("Agent Assistant", dashboard.text)
         self.assertEqual(stylesheet.status_code, 200)
-        self.assertIn("summary-grid", stylesheet.text)
+        self.assertIn("agent-panel", stylesheet.text)
         self.assertEqual(script.status_code, 200)
-        self.assertIn("loadDashboard", script.text)
+        self.assertIn("/api/agent/ask", script.text)
 
     def test_sumologic_connector_uses_sample_mode_by_default(self) -> None:
         connector = SumoLogicConnector(self.settings)
@@ -348,6 +480,60 @@ class CapacityMvpTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.json()["queued_resources"], 1)
+
+    def test_mcp_tools_wrap_current_fastapi_contract(self) -> None:
+        async def exercise_tools() -> None:
+            transport = httpx.ASGITransport(app=create_app(self.service))
+            api_client = CapacityApiClient(
+                CapacityApiConfig(
+                    base_url="http://testserver",
+                    transport=transport,
+                )
+            )
+            tools = CapacityMcpTools(api_client)
+            try:
+                ingestion = await tools.run_ingestion(idempotency_key="mcp-ingestion")
+                analysis = await tools.run_analysis(idempotency_key="mcp-analysis")
+                run_status = await tools.get_run_status(analysis["run_id"])
+                recommendations = await tools.list_recommendations(recommendation_type="scale_down")
+                latest_report = await tools.get_latest_report()
+                resources = await tools.list_resources(active_only=True)
+            finally:
+                await transport.aclose()
+
+            self.assertIn("run_id", ingestion)
+            self.assertEqual(analysis["queued_resources"], 3)
+            self.assertEqual(run_status["status"], "completed")
+            self.assertEqual(run_status["idempotency_key"], "mcp-analysis")
+            self.assertIn("recommendations", recommendations)
+            self.assertTrue(
+                all(item["recommendation_type"] == "scale_down" for item in recommendations["recommendations"])
+            )
+            self.assertIn("report_id", latest_report)
+            self.assertEqual(len(resources["resources"]), 3)
+
+        asyncio.run(exercise_tools())
+
+    def test_capacity_api_client_returns_structured_http_errors(self) -> None:
+        async def exercise_error() -> None:
+            transport = httpx.ASGITransport(app=create_app(self.service))
+            api_client = CapacityApiClient(
+                CapacityApiConfig(
+                    base_url="http://testserver",
+                    transport=transport,
+                )
+            )
+            try:
+                response = await api_client.get("/api/reports/latest")
+            finally:
+                await transport.aclose()
+
+            self.assertEqual(response["status"], "error")
+            self.assertEqual(response["error_type"], "http_status")
+            self.assertEqual(response["status_code"], 404)
+            self.assertEqual(response["detail"]["detail"], "report_not_found")
+
+        asyncio.run(exercise_error())
 
     def test_cloudwatch_can_act_as_primary_source_for_app_service_analysis(self) -> None:
         self.settings.analysis_window_days = 1

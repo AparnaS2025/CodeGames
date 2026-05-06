@@ -8,6 +8,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from app.agent_graph import CapacityAgent
 from app.service import CapacityIntelligenceService
 
 
@@ -16,11 +17,13 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 class IngestionRunRequest(BaseModel):
     window_days: int | None = Field(default=None, ge=1, le=90)
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class AnalysisRunRequest(BaseModel):
     resource_ids: list[str] | None = None
     source_categories: list[str] | None = None
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class RecommendationReviewRequest(BaseModel):
@@ -32,6 +35,11 @@ class RecommendationReviewRequest(BaseModel):
 class ReviewAssistantAskRequest(BaseModel):
     recommendation_id: str = Field(min_length=1)
     question: str = Field(min_length=1)
+
+
+class AgentAskRequest(BaseModel):
+    query: str = Field(min_length=1)
+    run_label: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 def create_app(service: CapacityIntelligenceService) -> FastAPI:
@@ -54,6 +62,9 @@ def create_app(service: CapacityIntelligenceService) -> FastAPI:
                 "GET /api/resources",
                 "GET /api/recommendations",
                 "GET /api/reports/latest",
+                "GET /api/runs",
+                "GET /api/runs/{run_id}",
+                "POST /api/agent/ask",
                 "POST /api/review-assistant/ask",
                 "GET /dashboard",
                 "GET /docs",
@@ -70,14 +81,32 @@ def create_app(service: CapacityIntelligenceService) -> FastAPI:
 
     @app.post("/api/ingestion/run", status_code=202)
     def run_ingestion(payload: IngestionRunRequest) -> dict[str, object]:
-        return service.run_ingestion(window_days=payload.window_days)
+        return service.run_ingestion(
+            window_days=payload.window_days,
+            idempotency_key=payload.idempotency_key,
+        )
 
     @app.post("/api/analysis/run", status_code=202)
     def run_analysis(payload: AnalysisRunRequest) -> dict[str, object]:
         return service.run_analysis(
             resource_ids=payload.resource_ids,
             source_categories=payload.source_categories,
+            idempotency_key=payload.idempotency_key,
         )
+
+    @app.get("/api/runs")
+    def list_runs(
+        run_type: str | None = Query(default=None),
+        limit: int = Query(default=20, ge=1, le=100),
+    ) -> dict[str, object]:
+        return {"runs": service.list_capacity_runs(run_type=run_type, limit=limit)}
+
+    @app.get("/api/runs/{run_id}")
+    def get_run(run_id: str) -> dict[str, object]:
+        run = service.get_capacity_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="run_not_found")
+        return run
 
     @app.get("/api/resources")
     def list_resources(
@@ -154,5 +183,10 @@ def create_app(service: CapacityIntelligenceService) -> FastAPI:
         if answer is None:
             raise HTTPException(status_code=404, detail="recommendation_not_found")
         return answer
+
+    @app.post("/api/agent/ask")
+    def ask_capacity_agent(payload: AgentAskRequest) -> dict[str, object]:
+        agent = CapacityAgent(service)
+        return agent.ask(query=payload.query, run_label=payload.run_label)
 
     return app

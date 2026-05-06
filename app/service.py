@@ -44,16 +44,32 @@ class CapacityIntelligenceService:
         self._ingestion_lock = Lock()
         self._analysis_lock = Lock()
 
-    def run_ingestion(self, window_days: int | None = None, now: datetime | None = None) -> dict[str, Any]:
+    def run_ingestion(
+        self,
+        window_days: int | None = None,
+        now: datetime | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        if idempotency_key:
+            existing_run = self.repository.get_capacity_run_by_idempotency_key("ingestion", idempotency_key)
+            if existing_run:
+                return self._capacity_run_response(existing_run, idempotent_replay=True)
+
         if not self._ingestion_lock.acquire(blocking=False):
             return {"status": "busy", "message": "An ingestion run is already in progress."}
+        run_id = f"ingestion-{uuid4()}"
+        request = {"window_days": window_days}
+        run_started = False
         try:
+            started_run = self._start_capacity_run(run_id, "ingestion", idempotency_key, request)
+            if started_run["run_id"] != run_id:
+                return self._capacity_run_response(started_run, idempotent_replay=True)
+            run_started = True
             effective_now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
             window_start, window_end = default_window(effective_now, window_days or self.settings.analysis_window_days)
             resources = sample_resources()
             self.repository.upsert_resources(resources)
             resource_lookup = {resource.resource_id: resource for resource in resources}
-            run_id = f"ingestion-{uuid4()}"
             source_results: list[dict[str, Any]] = []
             resource_index = build_resource_resolution_index(resource_lookup)
 
@@ -111,12 +127,27 @@ class CapacityIntelligenceService:
                         | {"error": str(exc)}
                     )
 
-            return {
+            result = {
                 "run_id": run_id,
+                "run_status": "completed",
+                "idempotency_key": idempotency_key,
                 "window_start_utc": window_start.isoformat(),
                 "window_end_utc": window_end.isoformat(),
                 "source_run_status": source_results,
             }
+            self.repository.complete_capacity_run(run_id, datetime.now(timezone.utc).isoformat(), result)
+            return result
+        except Exception as exc:
+            if run_started:
+                self.repository.fail_capacity_run(
+                    run_id,
+                    datetime.now(timezone.utc).isoformat(),
+                    {
+                        "error_type": type(exc).__name__,
+                        "message": str(exc),
+                    },
+                )
+            raise
         finally:
             self._ingestion_lock.release()
 
@@ -125,10 +156,26 @@ class CapacityIntelligenceService:
         resource_ids: list[str] | None = None,
         source_categories: list[str] | None = None,
         now: datetime | None = None,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
+        if idempotency_key:
+            existing_run = self.repository.get_capacity_run_by_idempotency_key("analysis", idempotency_key)
+            if existing_run:
+                return self._capacity_run_response(existing_run, idempotent_replay=True)
+
         if not self._analysis_lock.acquire(blocking=False):
             return {"status": "busy", "message": "An analysis run is already in progress."}
+        run_id = f"analysis-{uuid4()}"
+        request = {
+            "resource_ids": resource_ids,
+            "source_categories": source_categories,
+        }
+        run_started = False
         try:
+            started_run = self._start_capacity_run(run_id, "analysis", idempotency_key, request)
+            if started_run["run_id"] != run_id:
+                return self._capacity_run_response(started_run, idempotent_replay=True)
+            run_started = True
             effective_now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(second=0, microsecond=0)
             window_start, window_end = default_window(effective_now, self.settings.analysis_window_days)
             resources = self.repository.list_resources(active_only=True)
@@ -144,7 +191,6 @@ class CapacityIntelligenceService:
                 )
                 resources = [resource for resource in resources if resource["resource_id"] in resource_ids_for_categories]
 
-            run_id = f"analysis-{uuid4()}"
             created_recommendations: list[dict[str, Any]] = []
             resource_ids_in_scope = [resource["resource_id"] for resource in resources]
             metrics_by_resource = self.repository.get_metrics_for_resources(
@@ -202,11 +248,27 @@ class CapacityIntelligenceService:
             )
             self.repository.save_report(report)
 
-            return {
+            result = {
                 "analysis_run_id": run_id,
+                "run_id": run_id,
+                "run_status": "completed",
+                "idempotency_key": idempotency_key,
                 "queued_resources": len(resources),
                 "report_id": report.report_id,
             }
+            self.repository.complete_capacity_run(run_id, datetime.now(timezone.utc).isoformat(), result)
+            return result
+        except Exception as exc:
+            if run_started:
+                self.repository.fail_capacity_run(
+                    run_id,
+                    datetime.now(timezone.utc).isoformat(),
+                    {
+                        "error_type": type(exc).__name__,
+                        "message": str(exc),
+                    },
+                )
+            raise
         finally:
             self._analysis_lock.release()
 
@@ -282,6 +344,12 @@ class CapacityIntelligenceService:
     def latest_report(self) -> dict[str, Any] | None:
         return self.repository.get_latest_report()
 
+    def get_capacity_run(self, run_id: str) -> dict[str, Any] | None:
+        return self.repository.get_capacity_run(run_id)
+
+    def list_capacity_runs(self, run_type: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
+        return self.repository.list_capacity_runs(run_type=run_type, limit=limit)
+
     def answer_review_question(self, recommendation_id: str, question: str) -> dict[str, Any] | None:
         recommendation = self.repository.get_recommendation(recommendation_id)
         if not recommendation:
@@ -334,6 +402,47 @@ class CapacityIntelligenceService:
             indent=2,
             sort_keys=True,
         )
+
+    def _start_capacity_run(
+        self,
+        run_id: str,
+        run_type: str,
+        idempotency_key: str | None,
+        request: dict[str, Any],
+    ) -> dict[str, Any]:
+        try:
+            return self.repository.start_capacity_run(
+                run_id=run_id,
+                run_type=run_type,
+                idempotency_key=idempotency_key,
+                started_at_utc=datetime.now(timezone.utc).isoformat(),
+                request=request,
+            )
+        except Exception:
+            if idempotency_key:
+                existing_run = self.repository.get_capacity_run_by_idempotency_key(run_type, idempotency_key)
+                if existing_run:
+                    return existing_run
+            raise
+
+    @staticmethod
+    def _capacity_run_response(run: dict[str, Any], idempotent_replay: bool = False) -> dict[str, Any]:
+        if run["status"] == "completed" and run["result_json"]:
+            return {
+                **run["result_json"],
+                "run_status": run["status"],
+                "idempotent_replay": idempotent_replay,
+            }
+        payload: dict[str, Any] = {
+            "run_id": run["run_id"],
+            "run_status": run["status"],
+            "run_type": run["run_type"],
+            "idempotency_key": run["idempotency_key"],
+            "idempotent_replay": idempotent_replay,
+        }
+        if run["error_json"]:
+            payload["error"] = run["error_json"]
+        return payload
 
     def _infer_resources_from_payloads(
         self,

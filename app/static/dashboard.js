@@ -22,6 +22,12 @@ const elements = {
   detailStatus: document.querySelector("#detailStatus"),
   detailEvidence: document.querySelector("#detailEvidence"),
   detailGuardrails: document.querySelector("#detailGuardrails"),
+  agentStatus: document.querySelector("#agentStatus"),
+  agentQuery: document.querySelector("#agentQuery"),
+  agentAskButton: document.querySelector("#agentAskButton"),
+  agentResponse: document.querySelector("#agentResponse"),
+  agentTrace: document.querySelector("#agentTrace"),
+  agentPrompts: document.querySelectorAll("[data-agent-prompt]"),
 };
 
 function countBy(items, key) {
@@ -149,6 +155,82 @@ async function fetchJson(url) {
   return response.json();
 }
 
+async function postJson(url, payload) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(`${url} returned ${response.status}: ${detail}`);
+  }
+  return response.json();
+}
+
+function runLabelFromQuery(query) {
+  const normalized = query
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 40);
+  const timestamp = new Date().toISOString().replace(/[-:]/g, "").slice(0, 12);
+  return `${normalized || "dashboard-agent"}-${timestamp}`;
+}
+
+function renderAgentTrace(toolCalls) {
+  if (!toolCalls?.length) {
+    elements.agentTrace.textContent = "No tool calls recorded.";
+    elements.agentTrace.scrollTop = 0;
+    return;
+  }
+  elements.agentTrace.textContent = toolCalls
+    .map((call) => {
+      const summary = call.result_summary || {};
+      const detail = Object.entries(summary)
+        .map(([key, value]) => `${key}=${value}`)
+        .join(", ");
+      return `${call.name}${detail ? `: ${detail}` : ""}`;
+    })
+    .join("\n");
+  elements.agentTrace.scrollTop = 0;
+}
+
+async function askAgent() {
+  const query = elements.agentQuery.value.trim();
+  if (!query) {
+    elements.agentStatus.textContent = "Add a question";
+    elements.agentResponse.textContent = "Enter a request before asking the agent.";
+    return;
+  }
+
+  elements.agentAskButton.disabled = true;
+  elements.agentStatus.textContent = "Working";
+  elements.agentResponse.textContent = "Running agent workflow...";
+  elements.agentTrace.textContent = "";
+
+  try {
+    const result = await postJson("/api/agent/ask", {
+      query,
+      run_label: runLabelFromQuery(query),
+    });
+    const modeLabel = result.llm_enabled ? "LLM on" : "Guarded";
+    elements.agentStatus.textContent = `${formatLabel(result.intent || "complete")} · ${modeLabel}`;
+    elements.agentResponse.textContent = result.answer || "The agent completed without a text response.";
+    elements.agentResponse.scrollTop = 0;
+    renderAgentTrace(result.tool_calls || []);
+    await loadDashboard();
+  } catch (error) {
+    elements.agentStatus.textContent = "Error";
+    elements.agentResponse.textContent = `Agent request failed: ${error.message}`;
+    elements.agentTrace.textContent = "";
+  } finally {
+    elements.agentAskButton.disabled = false;
+  }
+}
+
 async function loadDashboard() {
   try {
     const [report, recommendations, resources] = await Promise.all([
@@ -172,6 +254,19 @@ async function loadDashboard() {
 
 [elements.search, elements.type, elements.risk, elements.confidence].forEach((control) => {
   control.addEventListener("input", renderRows);
+});
+
+elements.agentAskButton.addEventListener("click", askAgent);
+elements.agentQuery.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+    askAgent();
+  }
+});
+elements.agentPrompts.forEach((button) => {
+  button.addEventListener("click", () => {
+    elements.agentQuery.value = button.dataset.agentPrompt;
+    elements.agentQuery.focus();
+  });
 });
 
 loadDashboard();
