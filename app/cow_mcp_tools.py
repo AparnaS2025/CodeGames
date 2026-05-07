@@ -25,12 +25,14 @@ class CapacityMcpTools:
         self,
         resource_ids: list[str] | None = None,
         source_categories: list[str] | None = None,
+        window_days: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Run deterministic capacity analysis for all active resources or a requested subset."""
         payload = {
             "resource_ids": resource_ids,
             "source_categories": source_categories,
+            "window_days": window_days,
             "idempotency_key": idempotency_key,
         }
         return await self.api_client.post("/api/analysis/run", self.api_client._clean(payload))

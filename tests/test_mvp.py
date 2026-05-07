@@ -13,6 +13,7 @@ from app.api import create_app
 from app.agent_graph import CapacityAgent
 from app.agent_model import build_agent_llm
 from app.config import Settings
+from app.connectors.base import ConnectorFetchResult
 from app.connectors.sumologic import SUMOLOGIC_HTTP_LOG_PARSE_EXPRESSION, SumoLogicConnector
 from app.cow_api_client import CapacityApiClient, CapacityApiConfig
 from app.cow_mcp_tools import CapacityMcpTools
@@ -44,6 +45,7 @@ class CapacityMvpTests(unittest.TestCase):
     def setUp(self) -> None:
         settings = Settings()
         settings.db_path = ":memory:"
+        settings.analysis_window_days = 7
         settings.sumologic_use_sample_data = True
         self.settings = settings
         self.repository = Repository(settings.db_path)
@@ -64,6 +66,45 @@ class CapacityMvpTests(unittest.TestCase):
         self.assertEqual(len(self.service.list_resources(active_only=True)), 3)
         self.assertGreater(first_count, 0)
 
+    def test_ingestion_can_run_as_pure_sumologic_without_seeded_sample_resources(self) -> None:
+        class FakeSumologicConnector:
+            source_name = "sumologic"
+
+            def fetch(self, window_start: datetime, window_end: datetime) -> ConnectorFetchResult:
+                return ConnectorFetchResult(
+                    payloads=[
+                        RawMetricPayload(
+                            source="sumologic",
+                            external_resource_id="sumo-only-service",
+                            metric_name="sumo.ec2.cpu.utilization",
+                            timestamp=window_end - timedelta(minutes=5),
+                            value=42.0,
+                            unit="percent",
+                            dimensions={"wk_environment_type": "production"},
+                        )
+                    ],
+                    health={"status": "healthy", "mode": "api", "payload_count": 1},
+                )
+
+        settings = Settings()
+        settings.db_path = ":memory:"
+        settings.datadog_enabled = False
+        settings.cloudwatch_enabled = False
+        settings.sumologic_use_sample_data = False
+        repository = Repository(settings.db_path)
+        service = CapacityIntelligenceService(repository, settings, connectors=[FakeSumologicConnector()])
+        try:
+            result = service.run_ingestion(now=FIXED_NOW)
+            resources = service.list_resources(active_only=True)
+        finally:
+            repository.close()
+
+        self.assertEqual([item["source"] for item in result["source_run_status"]], ["sumologic"])
+        self.assertNotIn("checkout-api", {item["name"] for item in resources})
+        self.assertNotIn("analytics-worker", {item["name"] for item in resources})
+        self.assertNotIn("orders-db", {item["name"] for item in resources})
+        self.assertEqual({item["name"] for item in resources}, {"sumo-only-service"})
+
     def test_analysis_generates_recommendations_and_report(self) -> None:
         self.service.run_ingestion(now=FIXED_NOW)
         result = self.service.run_analysis(now=FIXED_NOW)
@@ -81,11 +122,120 @@ class CapacityMvpTests(unittest.TestCase):
 
     def test_stale_primary_data_becomes_insufficient_data(self) -> None:
         self.service.run_ingestion(now=FIXED_NOW)
-        self.service.run_analysis(now=FIXED_NOW + timedelta(days=2))
+        self.service.run_analysis(now=FIXED_NOW + timedelta(days=3))
         recommendations = self.service.list_recommendations()
 
         self.assertTrue(recommendations)
         self.assertTrue(all(item["recommendation_type"] == "insufficient_data" for item in recommendations[:3]))
+        self.assertTrue(
+            all(
+                any("Insufficient data reason(s):" in evidence for evidence in item["evidence_json"])
+                for item in recommendations[:3]
+            )
+        )
+
+    def test_analysis_uses_coverage_ratio_for_history_boundary(self) -> None:
+        self.settings.minimum_history_days = 7
+        self.settings.minimum_history_coverage_ratio = 0.90
+        resource = Resource(
+            resource_id="app-near-window",
+            name="near-window",
+            resource_type="app_service",
+            environment="prod",
+            current_size="large",
+            metadata={"source_aliases": {"sumologic": "near-window"}},
+        )
+        window_start = FIXED_NOW - timedelta(days=7)
+        window_end = FIXED_NOW
+        metrics = [
+            NormalizedMetricPoint(
+                resource_id=resource.resource_id,
+                metric_name="ec2_cpu_percent",
+                timestamp_utc=timestamp,
+                value=42.0,
+                unit="percent",
+                source="sumologic",
+                dimensions={},
+            ).to_record()
+            for timestamp in (window_start + timedelta(hours=1, minutes=40), window_end - timedelta(minutes=1))
+        ]
+
+        features, tags, _ = build_analysis_snapshot(resource, metrics, window_start, window_end, self.settings)
+
+        self.assertAlmostEqual(features["history_days"], 6.93, places=2)
+        self.assertAlmostEqual(features["cpu_coverage_ratio"], 0.99, places=2)
+        self.assertNotIn("short history", features["insufficient_data_reasons"])
+        self.assertNotIn("insufficient_data", tags)
+        recommendation = generate_recommendation(resource, features, tags, self.settings)
+        self.assertTrue(any("CPU telemetry coverage is 99.0%" in item for item in recommendation.evidence))
+
+    def test_analysis_flags_short_history_when_cpu_coverage_is_low(self) -> None:
+        self.settings.minimum_history_days = 7
+        self.settings.minimum_history_coverage_ratio = 0.90
+        resource = Resource(
+            resource_id="app-short-history",
+            name="short-history",
+            resource_type="app_service",
+            environment="prod",
+            current_size="large",
+            metadata={"source_aliases": {"sumologic": "short-history"}},
+        )
+        window_start = FIXED_NOW - timedelta(days=7)
+        window_end = FIXED_NOW
+        metrics = [
+            NormalizedMetricPoint(
+                resource_id=resource.resource_id,
+                metric_name="ec2_cpu_percent",
+                timestamp_utc=timestamp,
+                value=42.0,
+                unit="percent",
+                source="sumologic",
+                dimensions={},
+            ).to_record()
+            for timestamp in (window_end - timedelta(days=1), window_end - timedelta(minutes=1))
+        ]
+
+        features, tags, _ = build_analysis_snapshot(resource, metrics, window_start, window_end, self.settings)
+        recommendation = generate_recommendation(resource, features, tags, self.settings)
+
+        self.assertLess(features["cpu_coverage_ratio"], 0.90)
+        self.assertIn("short history", features["insufficient_data_reasons"])
+        self.assertIn("insufficient_data", tags)
+        self.assertTrue(any("CPU telemetry coverage is" in item and "insufficient" in item for item in recommendation.evidence))
+
+    def test_analysis_separates_missing_cpu_from_short_history(self) -> None:
+        self.settings.minimum_history_days = 7
+        self.settings.minimum_history_coverage_ratio = 0.90
+        resource = Resource(
+            resource_id="app-alb-only",
+            name="alb-only",
+            resource_type="app_service",
+            environment="prod",
+            current_size="large",
+            metadata={"source_aliases": {"sumologic": "alb-only"}},
+        )
+        window_start = FIXED_NOW - timedelta(days=7)
+        window_end = FIXED_NOW
+        metrics = [
+            NormalizedMetricPoint(
+                resource_id=resource.resource_id,
+                metric_name="target_response_time_ms",
+                timestamp_utc=timestamp,
+                value=120.0,
+                unit="milliseconds",
+                source="sumologic",
+                dimensions={},
+            ).to_record()
+            for timestamp in (window_start + timedelta(hours=1), window_end - timedelta(minutes=1))
+        ]
+
+        features, tags, _ = build_analysis_snapshot(resource, metrics, window_start, window_end, self.settings)
+        recommendation = generate_recommendation(resource, features, tags, self.settings)
+
+        self.assertIn("missing CPU", features["insufficient_data_reasons"])
+        self.assertNotIn("short history", features["insufficient_data_reasons"])
+        self.assertIn("insufficient_data", tags)
+        self.assertTrue(any("Telemetry coverage is" in item for item in recommendation.evidence))
 
     def test_duplicate_review_action_is_idempotent(self) -> None:
         self.service.run_ingestion(now=FIXED_NOW)
@@ -198,12 +348,91 @@ class CapacityMvpTests(unittest.TestCase):
         self.assertIn("No capacity change was applied", first.json()["answer"])
         self.assertEqual(
             [call["name"] for call in first.json()["tool_calls"]],
-            ["run_ingestion", "run_analysis", "get_run_status", "get_latest_report", "list_recommendations"],
+            [
+                "run_ingestion",
+                "match_resources",
+                "run_analysis",
+                "get_run_status",
+                "get_latest_report",
+                "list_recommendations",
+            ],
         )
         self.assertEqual(second.status_code, 200)
         self.assertEqual(len(self.service.list_recommendations()), recommendation_count)
-        analysis_replay = second.json()["tool_calls"][1]["result_summary"]
+        analysis_replay = second.json()["tool_calls"][2]["result_summary"]
         self.assertTrue(analysis_replay["idempotent_replay"])
+
+    def test_langgraph_agent_scopes_customer_window_and_idempotency_key(self) -> None:
+        first = self.client.post(
+            "/api/agent/ask",
+            json={"query": "Can you run the cycle for checkout for last 7 days?", "run_label": "scoped-cycle-a"},
+        )
+        second = self.client.post(
+            "/api/agent/ask",
+            json={"query": "Can you run the cycle for checkout for last 7 days?", "run_label": "scoped-cycle-b"},
+        )
+
+        self.assertEqual(first.status_code, 200)
+        tool_summaries = {call["name"]: call["result_summary"] for call in first.json()["tool_calls"]}
+        self.assertEqual(tool_summaries["run_ingestion"]["window_days"], 7)
+        self.assertEqual(tool_summaries["match_resources"]["customer"], "checkout")
+        self.assertEqual(tool_summaries["match_resources"]["matched_resources"], 1)
+        self.assertEqual(tool_summaries["run_analysis"]["queued_resources"], 1)
+        self.assertEqual(tool_summaries["run_analysis"]["window_days"], 7)
+        self.assertEqual(
+            tool_summaries["run_analysis"]["idempotency_key"],
+            "analysis|customer=checkout|window=7d|analysis_version=v1",
+        )
+        self.assertIn("Scope: checkout, last 7 days", first.json()["answer"])
+
+        self.assertEqual(second.status_code, 200)
+        replay_summaries = {call["name"]: call["result_summary"] for call in second.json()["tool_calls"]}
+        self.assertTrue(replay_summaries["run_ingestion"]["idempotent_replay"])
+        self.assertTrue(replay_summaries["run_analysis"]["idempotent_replay"])
+
+    def test_langgraph_agent_force_refresh_bypasses_stable_cache(self) -> None:
+        first = self.client.post(
+            "/api/agent/ask",
+            json={"query": "Run the cycle for checkout for last 7 days", "run_label": "cache-cycle-a"},
+        )
+        replay = self.client.post(
+            "/api/agent/ask",
+            json={"query": "Run the cycle for checkout for last 7 days", "run_label": "cache-cycle-b"},
+        )
+        forced = self.client.post(
+            "/api/agent/ask",
+            json={"query": "Force refresh checkout for last 7 days with no cache", "run_label": "force-cycle-a"},
+        )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(replay.status_code, 200)
+        self.assertEqual(forced.status_code, 200)
+        replay_summaries = {call["name"]: call["result_summary"] for call in replay.json()["tool_calls"]}
+        force_summaries = {call["name"]: call["result_summary"] for call in forced.json()["tool_calls"]}
+        self.assertTrue(replay_summaries["run_ingestion"]["idempotent_replay"])
+        self.assertTrue(replay_summaries["run_analysis"]["idempotent_replay"])
+        self.assertNotIn("idempotent_replay", force_summaries["run_ingestion"])
+        self.assertNotIn("idempotent_replay", force_summaries["run_analysis"])
+        self.assertEqual(
+            force_summaries["run_analysis"]["idempotency_key"],
+            "analysis|customer=checkout|window=7d|analysis_version=v1|refresh=force-cycle-a",
+        )
+        self.assertTrue(force_summaries["list_recommendations"]["scope"]["force_refresh"])
+        self.assertIn("Cache bypass requested", forced.json()["answer"])
+
+    def test_langgraph_agent_does_not_treat_window_as_customer(self) -> None:
+        response = self.client.post(
+            "/api/agent/ask",
+            json={"query": "Run the capacity cycle for last 7 days"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        match_summary = next(call["result_summary"] for call in response.json()["tool_calls"] if call["name"] == "match_resources")
+        analysis_summary = next(call["result_summary"] for call in response.json()["tool_calls"] if call["name"] == "run_analysis")
+        self.assertEqual(match_summary["customer"], "all")
+        self.assertEqual(match_summary["matched_resources"], 3)
+        self.assertEqual(analysis_summary["queued_resources"], 3)
+        self.assertEqual(analysis_summary["window_days"], 7)
 
     def test_langgraph_agent_reviews_latest_report(self) -> None:
         self.service.run_ingestion(now=FIXED_NOW)
@@ -281,6 +510,33 @@ class CapacityMvpTests(unittest.TestCase):
 
         self.assertIsNone(build_agent_llm(settings))
 
+    def test_settings_defaults_use_sixty_day_analysis_and_forty_eight_hour_staleness(self) -> None:
+        original_analysis = os.environ.get("ANALYSIS_WINDOW_DAYS")
+        original_stale = os.environ.get("STALE_AFTER_HOURS")
+        original_coverage = os.environ.get("MINIMUM_HISTORY_COVERAGE_RATIO")
+        try:
+            os.environ.pop("ANALYSIS_WINDOW_DAYS", None)
+            os.environ.pop("STALE_AFTER_HOURS", None)
+            os.environ.pop("MINIMUM_HISTORY_COVERAGE_RATIO", None)
+            defaults = Settings()
+
+            self.assertEqual(defaults.analysis_window_days, 60)
+            self.assertEqual(defaults.stale_after_hours, 48)
+            self.assertEqual(defaults.minimum_history_coverage_ratio, 0.90)
+        finally:
+            if original_analysis is None:
+                os.environ.pop("ANALYSIS_WINDOW_DAYS", None)
+            else:
+                os.environ["ANALYSIS_WINDOW_DAYS"] = original_analysis
+            if original_stale is None:
+                os.environ.pop("STALE_AFTER_HOURS", None)
+            else:
+                os.environ["STALE_AFTER_HOURS"] = original_stale
+            if original_coverage is None:
+                os.environ.pop("MINIMUM_HISTORY_COVERAGE_RATIO", None)
+            else:
+                os.environ["MINIMUM_HISTORY_COVERAGE_RATIO"] = original_coverage
+
     def test_root_and_health_routes_are_available(self) -> None:
         root = self.client.get("/")
         self.assertEqual(root.status_code, 200)
@@ -305,18 +561,26 @@ class CapacityMvpTests(unittest.TestCase):
         self.assertIn("Recommendation Summary", dashboard.text)
         self.assertIn("Agent Assistant", dashboard.text)
         self.assertIn("name=\"agentMode\"", dashboard.text)
+        self.assertIn("Force refresh Chevron for last 7 days with no cache", dashboard.text)
+        self.assertIn("insufficientReasons", dashboard.text)
+        self.assertIn("Missing CPU", dashboard.text)
+        self.assertIn("Short history", dashboard.text)
+        self.assertIn("Stale source", dashboard.text)
+        self.assertIn("No primary source", dashboard.text)
         self.assertIn("Approval Pack", dashboard.text)
         self.assertIn("Capacity action items", dashboard.text)
         self.assertEqual(stylesheet.status_code, 200)
         self.assertIn("wk-logo", stylesheet.text)
         self.assertIn("codegames-logo", stylesheet.text)
         self.assertIn("agent-panel", stylesheet.text)
+        self.assertIn("reason-breakdown", stylesheet.text)
         self.assertIn("workspace detail agent", stylesheet.text)
         self.assertIn("actions-panel", stylesheet.text)
         self.assertEqual(script.status_code, 200)
         self.assertIn("/api/agent/ask", script.text)
         self.assertIn("/api/action-items", script.text)
         self.assertIn("answer_mode", script.text)
+        self.assertIn("insufficientReasonCounts", script.text)
         self.assertIn("data-review-decision", dashboard.text)
 
     def test_sumologic_connector_uses_sample_mode_by_default(self) -> None:
@@ -538,7 +802,7 @@ class CapacityMvpTests(unittest.TestCase):
 
         response = self.client.post(
             "/api/analysis/run",
-            json={"source_categories": ["prod/tenant/deploy/permitvision/errors"]},
+            json={"source_categories": ["prod/tenant/deploy/permitvision/errors"], "window_days": 30},
         )
 
         self.assertEqual(response.status_code, 202)

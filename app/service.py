@@ -36,11 +36,7 @@ class CapacityIntelligenceService:
         self.settings = settings or Settings()
         self.settings.ensure_directories()
         self.repository = repository
-        self.connectors = connectors or [
-            DatadogConnector(),
-            CloudWatchConnector(),
-            SumoLogicConnector(self.settings),
-        ]
+        self.connectors = connectors or self._build_default_connectors()
         self._ingestion_lock = Lock()
         self._analysis_lock = Lock()
 
@@ -66,8 +62,9 @@ class CapacityIntelligenceService:
                 return self._capacity_run_response(started_run, idempotent_replay=True)
             run_started = True
             effective_now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-            window_start, window_end = default_window(effective_now, window_days or self.settings.analysis_window_days)
-            resources = sample_resources()
+            effective_window_days = window_days or self.settings.analysis_window_days
+            window_start, window_end = default_window(effective_now, effective_window_days)
+            resources = sample_resources() if self._should_seed_sample_resources() else []
             self.repository.upsert_resources(resources)
             resource_lookup = {resource.resource_id: resource for resource in resources}
             source_results: list[dict[str, Any]] = []
@@ -133,6 +130,7 @@ class CapacityIntelligenceService:
                 "idempotency_key": idempotency_key,
                 "window_start_utc": window_start.isoformat(),
                 "window_end_utc": window_end.isoformat(),
+                "window_days": effective_window_days,
                 "source_run_status": source_results,
             }
             self.repository.complete_capacity_run(run_id, datetime.now(timezone.utc).isoformat(), result)
@@ -151,10 +149,23 @@ class CapacityIntelligenceService:
         finally:
             self._ingestion_lock.release()
 
+    def _build_default_connectors(self) -> list[SourceConnector]:
+        connectors: list[SourceConnector] = []
+        if self.settings.datadog_enabled:
+            connectors.append(DatadogConnector())
+        if self.settings.cloudwatch_enabled:
+            connectors.append(CloudWatchConnector())
+        connectors.append(SumoLogicConnector(self.settings))
+        return connectors
+
+    def _should_seed_sample_resources(self) -> bool:
+        return self.settings.datadog_enabled or self.settings.cloudwatch_enabled or self.settings.sumologic_use_sample_data
+
     def run_analysis(
         self,
         resource_ids: list[str] | None = None,
         source_categories: list[str] | None = None,
+        window_days: int | None = None,
         now: datetime | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -169,6 +180,7 @@ class CapacityIntelligenceService:
         request = {
             "resource_ids": resource_ids,
             "source_categories": source_categories,
+            "window_days": window_days,
         }
         run_started = False
         try:
@@ -177,7 +189,8 @@ class CapacityIntelligenceService:
                 return self._capacity_run_response(started_run, idempotent_replay=True)
             run_started = True
             effective_now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(second=0, microsecond=0)
-            window_start, window_end = default_window(effective_now, self.settings.analysis_window_days)
+            effective_window_days = window_days or self.settings.analysis_window_days
+            window_start, window_end = default_window(effective_now, effective_window_days)
             resources = self.repository.list_resources(active_only=True)
             if resource_ids:
                 resources = [resource for resource in resources if resource["resource_id"] in resource_ids]
@@ -238,7 +251,9 @@ class CapacityIntelligenceService:
                 scope={
                     "environment": sorted({resource["environment"] for resource in resources}),
                     "resource_count": len(resources),
+                    "resource_ids": resource_ids or [],
                     "source_categories": source_categories or [],
+                    "window_days": effective_window_days,
                 },
                 summary_text=report_summary,
                 details={
@@ -253,6 +268,9 @@ class CapacityIntelligenceService:
                 "run_id": run_id,
                 "run_status": "completed",
                 "idempotency_key": idempotency_key,
+                "window_start_utc": window_start.isoformat(),
+                "window_end_utc": window_end.isoformat(),
+                "window_days": effective_window_days,
                 "queued_resources": len(resources),
                 "report_id": report.report_id,
             }

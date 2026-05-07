@@ -15,10 +15,13 @@ def _default_db_path() -> Path:
 @dataclass(slots=True)
 class Settings:
     db_path: Path | str = field(default_factory=_default_db_path)
-    analysis_window_days: int = field(default_factory=lambda: int(os.getenv("ANALYSIS_WINDOW_DAYS", "30")))
+    analysis_window_days: int = field(default_factory=lambda: int(os.getenv("ANALYSIS_WINDOW_DAYS", "60")))
     metric_resolution_minutes: int = field(default_factory=lambda: int(os.getenv("METRIC_RESOLUTION_MINUTES", "5")))
     minimum_history_days: int = field(default_factory=lambda: int(os.getenv("MINIMUM_HISTORY_DAYS", "7")))
-    stale_after_hours: int = field(default_factory=lambda: int(os.getenv("STALE_AFTER_HOURS", "6")))
+    minimum_history_coverage_ratio: float = field(
+        default_factory=lambda: float(os.getenv("MINIMUM_HISTORY_COVERAGE_RATIO", "0.90"))
+    )
+    stale_after_hours: int = field(default_factory=lambda: int(os.getenv("STALE_AFTER_HOURS", "48")))
     sumologic_api_url: str = field(default_factory=lambda: os.getenv("SUMOLOGIC_API_URL", "").rstrip("/"))
     sumologic_access_id: str = field(default_factory=lambda: os.getenv("SUMOLOGIC_ACCESS_ID", ""))
     sumologic_access_key: str = field(default_factory=lambda: os.getenv("SUMOLOGIC_ACCESS_KEY", ""))
@@ -47,6 +50,8 @@ class Settings:
     sumologic_use_sample_data: bool = field(
         default_factory=lambda: os.getenv("SUMOLOGIC_USE_SAMPLE_DATA", "true").lower() != "false"
     )
+    datadog_enabled: bool = field(default_factory=lambda: os.getenv("DATADOG_ENABLED", "true").lower() != "false")
+    cloudwatch_enabled: bool = field(default_factory=lambda: os.getenv("CLOUDWATCH_ENABLED", "true").lower() != "false")
     agent_enable_llm: bool = field(default_factory=lambda: os.getenv("AGENT_ENABLE_LLM", "false").lower() == "true")
     agent_max_tool_iterations: int = field(default_factory=lambda: int(os.getenv("AGENT_MAX_TOOL_ITERATIONS", "6")))
     azure_openai_endpoint: str = field(default_factory=lambda: os.getenv("AZURE_OPENAI_ENDPOINT", "").rstrip("/"))

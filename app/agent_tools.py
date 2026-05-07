@@ -20,12 +20,17 @@ class CapacityAgentTools:
         idempotency_key: str,
         resource_ids: list[str] | None = None,
         source_categories: list[str] | None = None,
+        window_days: int | None = None,
     ) -> dict[str, Any]:
         return self.service.run_analysis(
             resource_ids=resource_ids,
             source_categories=source_categories,
+            window_days=window_days,
             idempotency_key=idempotency_key,
         )
+
+    def list_resources(self, active_only: bool = True) -> list[dict[str, Any]]:
+        return self.service.list_resources(active_only=active_only)
 
     def get_latest_report(self) -> dict[str, Any] | None:
         return self.service.latest_report()

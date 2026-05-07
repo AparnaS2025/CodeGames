@@ -23,6 +23,7 @@ class IngestionRunRequest(BaseModel):
 class AnalysisRunRequest(BaseModel):
     resource_ids: list[str] | None = None
     source_categories: list[str] | None = None
+    window_days: int | None = Field(default=None, ge=1, le=90)
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=128)
 
 
@@ -95,6 +96,7 @@ def create_app(service: CapacityIntelligenceService) -> FastAPI:
         return service.run_analysis(
             resource_ids=payload.resource_ids,
             source_categories=payload.source_categories,
+            window_days=payload.window_days,
             idempotency_key=payload.idempotency_key,
         )
 

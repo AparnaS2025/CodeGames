@@ -36,6 +36,7 @@ class CapacityAgentState(TypedDict, total=False):
     llm_used: bool
     tool_calls: list[dict[str, Any]]
     error: str | None
+    scope: dict[str, Any]
 
 
 class ChatModel(Protocol):
@@ -113,12 +114,48 @@ class CapacityAgent:
 
     def _execute_cycle_node(self, state: CapacityAgentState) -> CapacityAgentState:
         tool_calls = list(state.get("tool_calls", []))
-        run_label = state["run_label"]
+        scope = _parse_request_scope(state["query"], self.service.settings.analysis_window_days)
+        stable_key = _stable_idempotency_key(scope)
+        idempotency_key = _execution_idempotency_key(stable_key, scope, state["run_label"])
 
-        ingestion = self.tools.run_ingestion(idempotency_key=f"ingestion-{run_label}")
+        ingestion = self.tools.run_ingestion(
+            idempotency_key=f"ingestion|{idempotency_key}",
+            window_days=scope["window_days"],
+        )
         _record_tool_call(tool_calls, "run_ingestion", ingestion)
 
-        analysis = self.tools.run_analysis(idempotency_key=f"analysis-{run_label}")
+        resources = self.tools.list_resources(active_only=True)
+        matched_resources = _match_resources(resources, scope.get("customer"))
+        if scope.get("customer") and not matched_resources:
+            _record_tool_call(tool_calls, "match_resources", {"customer": scope["customer"], "matched_resources": 0})
+            deterministic_answer = (
+                f"I could not find active resources matching `{scope['customer']}` after ingestion. "
+                f"No analysis was run for this scoped request. Window requested: last {scope['window_days']} days. "
+                "No capacity change was applied; this is advisory-only."
+            )
+            answer, llm_used = self._llm_summarize(
+                state={**state, "scope": scope},
+                intent="execute_cycle",
+                deterministic_answer=deterministic_answer,
+                facts={"scope": scope, "matched_resources": []},
+            )
+            return {**state, "scope": scope, "answer": answer, "llm_used": llm_used, "tool_calls": tool_calls}
+
+        resource_ids = [resource["resource_id"] for resource in matched_resources] if scope.get("customer") else None
+        _record_tool_call(
+            tool_calls,
+            "match_resources",
+            {
+                "customer": scope.get("customer") or "all",
+                "matched_resources": len(matched_resources) if scope.get("customer") else len(resources),
+            },
+        )
+
+        analysis = self.tools.run_analysis(
+            idempotency_key=f"analysis|{idempotency_key}",
+            resource_ids=resource_ids,
+            window_days=scope["window_days"],
+        )
         _record_tool_call(tool_calls, "run_analysis", analysis)
 
         if analysis.get("run_id"):
@@ -128,22 +165,30 @@ class CapacityAgent:
         report = self.tools.get_latest_report()
         _record_tool_call(tool_calls, "get_latest_report", report)
 
-        recommendations = self.tools.list_recommendations()
-        _record_tool_call(tool_calls, "list_recommendations", {"count": len(recommendations)})
+        report_recommendations = (report or {}).get("details_json", {}).get("recommendations", [])
+        recommendations = _filter_recommendations_by_resources(report_recommendations, resource_ids)
+        if not recommendations:
+            recommendations = _filter_recommendations_by_resources(self.tools.list_recommendations(), resource_ids)
+        _record_tool_call(
+            tool_calls,
+            "list_recommendations",
+            {"count": len(recommendations), "scope": scope},
+        )
 
-        deterministic_answer = _summarize_capacity_cycle(ingestion, analysis, report, recommendations)
+        deterministic_answer = _summarize_capacity_cycle(ingestion, analysis, report, recommendations, scope=scope)
         answer, llm_used = self._llm_summarize(
-            state=state,
+            state={**state, "scope": scope},
             intent="execute_cycle",
             deterministic_answer=deterministic_answer,
             facts={
+                "scope": scope,
                 "ingestion": _result_summary(ingestion),
                 "analysis": _result_summary(analysis),
                 "report": _compact_report(report),
                 "recommendation_summary": _recommendation_summary(recommendations),
             },
         )
-        return {**state, "answer": answer, "llm_used": llm_used, "tool_calls": tool_calls}
+        return {**state, "scope": scope, "answer": answer, "llm_used": llm_used, "tool_calls": tool_calls}
 
     def _run_status_node(self, state: CapacityAgentState) -> CapacityAgentState:
         tool_calls = list(state.get("tool_calls", []))
@@ -263,12 +308,17 @@ def _result_summary(result: Any) -> dict[str, Any]:
             "analysis_run_id",
             "run_status",
             "status",
+            "idempotency_key",
             "report_id",
             "queued_resources",
             "idempotent_replay",
             "recommendation_id",
             "recommendation_type",
             "created_at_utc",
+            "window_days",
+            "matched_resources",
+            "customer",
+            "scope",
         )
         return {key: result[key] for key in summary_keys if key in result}
     return {"value": str(result)}
@@ -279,7 +329,9 @@ def _summarize_capacity_cycle(
     analysis: dict[str, Any],
     report: dict[str, Any] | None,
     recommendations: list[dict[str, Any]],
+    scope: dict[str, Any] | None = None,
 ) -> str:
+    scope = scope or {}
     counts = Counter(item["recommendation_type"] for item in recommendations)
     total = len(recommendations)
     insufficient = counts.get("insufficient_data", 0)
@@ -305,15 +357,23 @@ def _summarize_capacity_cycle(
 
     report_id = report["report_id"] if report else "unavailable"
     report_time = report["created_at_utc"] if report else "unavailable"
+    scope_text = (
+        f" Scope: {scope.get('customer') or 'all resources'}, last {scope.get('window_days') or 'configured'} days."
+    )
+    if scope.get("force_refresh"):
+        scope_text += " Cache bypass requested."
     parts = [
         data_warning
         + f"Capacity cycle completed. Ingestion run `{ingestion.get('run_id', 'unavailable')}` and analysis run "
         + f"`{analysis.get('run_id') or analysis.get('analysis_run_id', 'unavailable')}` produced report `{report_id}` "
-        + f"at {report_time}.",
+        + f"at {report_time}.{scope_text}",
         f"Recommendation counts: scale_up={counts.get('scale_up', 0)}, scale_down={counts.get('scale_down', 0)}, "
         + f"watchlist={counts.get('watchlist', 0)}, hold={counts.get('hold', 0)}, "
         + f"insufficient_data={insufficient}.",
     ]
+    insufficient_reason_summary = _insufficient_reason_summary(recommendations)
+    if insufficient_reason_summary:
+        parts.append(f"Insufficient-data reasons: {insufficient_reason_summary}.")
     if urgent:
         parts.append(f"URGENT scale-up resources: {', '.join(urgent)}.")
     if review_priority:
@@ -439,7 +499,133 @@ def _recommendation_summary(recommendations: list[dict[str, Any]]) -> dict[str, 
         "scale_down": [_compact_recommendation(item) for item in recommendations if item["recommendation_type"] == "scale_down"][:5],
         "watchlist": [_compact_recommendation(item) for item in recommendations if item["recommendation_type"] == "watchlist"][:5],
         "insufficient_data_count": counts.get("insufficient_data", 0),
+        "insufficient_data_reasons": dict(_count_insufficient_reasons(recommendations)),
     }
+
+
+def _parse_request_scope(query: str, default_window_days: int) -> dict[str, Any]:
+    window_days = _extract_window_days(query) or default_window_days
+    customer = _extract_customer_or_resource(query)
+    return {
+        "customer": customer,
+        "window_days": window_days,
+        "analysis_version": "v1",
+        "force_refresh": _is_force_refresh_request(query),
+    }
+
+
+def _extract_window_days(query: str) -> int | None:
+    match = re.search(r"\b(?:last|past)\s+(\d{1,2})\s+days?\b", query, flags=re.IGNORECASE)
+    if not match:
+        return None
+    return max(1, min(int(match.group(1)), 90))
+
+
+def _extract_customer_or_resource(query: str) -> str | None:
+    patterns = (
+        r"\bfor\s+(?!(?:the\s+)?(?:last|past)\s+\d{1,2}\s+days?\b)(.+?)(?:\s+for\s+(?:the\s+)?(?:last|past)\b|\s+(?:last|past)\s+\d{1,2}\s+days?\b|\s+and\b|$)",
+        r"\b(?:force refresh|force rerun|fresh run|live refresh)\s+(?!the\s+cycle\b)(.+?)(?:\s+(?:for\s+)?(?:last|past)\s+\d{1,2}\s+days?\b|\s+with\s+no\s+cache\b|$)",
+        r"\b(?:customer|client|tenant|resource)\s+([A-Za-z0-9][A-Za-z0-9 _.-]{1,80})",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, query, flags=re.IGNORECASE)
+        if match:
+            candidate = _clean_scope_term(match.group(1))
+            if candidate:
+                return candidate
+    return None
+
+
+def _clean_scope_term(value: str) -> str | None:
+    cleaned = re.sub(
+        r"\b(the|a|an|all|full|capacity|cycle|resources?|recommendations?|analysis|pipeline)\b",
+        " ",
+        value,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"[^A-Za-z0-9_. -]+", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -_.")
+    return cleaned or None
+
+
+def _stable_idempotency_key(scope: dict[str, Any]) -> str:
+    customer = _slug(scope.get("customer") or "all")
+    window_days = int(scope.get("window_days") or 60)
+    version = _slug(scope.get("analysis_version") or "v1")
+    return f"customer={customer}|window={window_days}d|analysis_version={version}"
+
+
+def _execution_idempotency_key(stable_key: str, scope: dict[str, Any], run_label: str) -> str:
+    if not scope.get("force_refresh"):
+        return stable_key
+    return f"{stable_key}|refresh={_slug(run_label)}"
+
+
+def _is_force_refresh_request(query: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(force refresh|force rerun|fresh run|no cache|bypass cache|ignore cache|do not use cache|live refresh)\b",
+            query,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _slug(value: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return normalized or "all"
+
+
+def _match_resources(resources: list[dict[str, Any]], customer: str | None) -> list[dict[str, Any]]:
+    if not customer:
+        return resources
+    needle = customer.lower()
+    return [resource for resource in resources if needle in _resource_search_text(resource)]
+
+
+def _resource_search_text(resource: dict[str, Any]) -> str:
+    metadata = resource.get("metadata_json") or {}
+    metadata_text = " ".join(str(value) for value in metadata.values())
+    return " ".join(
+        [
+            str(resource.get("resource_id", "")),
+            str(resource.get("resource_name", "")),
+            str(resource.get("name", "")),
+            str(resource.get("resource_type", "")),
+            str(resource.get("environment", "")),
+            metadata_text,
+        ]
+    ).lower()
+
+
+def _filter_recommendations_by_resources(
+    recommendations: list[dict[str, Any]],
+    resource_ids: list[str] | None,
+) -> list[dict[str, Any]]:
+    if not resource_ids:
+        return recommendations
+    allowed = set(resource_ids)
+    return [item for item in recommendations if item.get("resource_id") in allowed]
+
+
+def _count_insufficient_reasons(recommendations: list[dict[str, Any]]) -> Counter:
+    reasons: Counter = Counter()
+    for item in recommendations:
+        if item.get("recommendation_type") != "insufficient_data":
+            continue
+        for evidence in item.get("evidence_json", []):
+            if evidence.lower().startswith("insufficient data reason"):
+                reason_text = evidence.split(":", 1)[-1].strip(" .")
+                for reason in reason_text.split(","):
+                    cleaned = reason.strip()
+                    if cleaned:
+                        reasons[cleaned] += 1
+    return reasons
+
+
+def _insufficient_reason_summary(recommendations: list[dict[str, Any]]) -> str:
+    counts = _count_insufficient_reasons(recommendations)
+    return ", ".join(f"{reason}={count}" for reason, count in counts.most_common())
 
 
 def _extract_recommendation_id(query: str) -> str | None:

@@ -98,6 +98,19 @@ def _metric_entries(grouped: dict[str, list[dict[str, Any]]], metric_names: tupl
     return []
 
 
+def _history_days(entries: list[dict[str, Any]]) -> float:
+    if not entries:
+        return 0.0
+    timestamps = sorted(datetime.fromisoformat(entry["timestamp_utc"]) for entry in entries)
+    return round((timestamps[-1] - timestamps[0]).total_seconds() / 86400.0, 2)
+
+
+def _coverage_ratio(observed_days: float, required_days: float) -> float:
+    if required_days <= 0:
+        return 1.0
+    return round(min(observed_days / required_days, 1.0), 4)
+
+
 def _count_sustained(values: list[float], predicate: Any, minimum_streak: int = 12) -> int:
     streak = 0
     count = 0
@@ -381,20 +394,34 @@ def build_analysis_snapshot(
         primary_source = next(iter(source_freshness))
         primary_freshness = source_freshness[primary_source]
 
-    history_days = 0.0
-    if cpu_values:
-        first = datetime.fromisoformat(cpu_entries[0]["timestamp_utc"])
-        last = datetime.fromisoformat(cpu_entries[-1]["timestamp_utc"])
-        history_days = round((last - first).total_seconds() / 86400.0, 2)
-    insufficient_data = (
-        not cpu_values
-        or history_days < settings.minimum_history_days
-        or primary_freshness is None
-        or primary_freshness["is_stale"]
-    )
+    requested_window_days = round((window_end - window_start).total_seconds() / 86400.0, 2)
+    required_history_days = round(min(float(settings.minimum_history_days), requested_window_days), 2)
+    all_metric_entries = [entry for entries in grouped.values() for entry in entries]
+    telemetry_history_days = _history_days(all_metric_entries)
+    cpu_history_days = _history_days(cpu_entries)
+    telemetry_coverage_ratio = _coverage_ratio(telemetry_history_days, required_history_days)
+    cpu_coverage_ratio = _coverage_ratio(cpu_history_days, required_history_days)
+    insufficient_reasons: list[str] = []
+    if not cpu_values:
+        insufficient_reasons.append("missing CPU")
+    elif cpu_coverage_ratio < settings.minimum_history_coverage_ratio:
+        insufficient_reasons.append("short history")
+    if primary_freshness is None:
+        insufficient_reasons.append("no primary source")
+    elif primary_freshness["is_stale"]:
+        insufficient_reasons.append("stale source")
+    insufficient_data = bool(insufficient_reasons)
     feature_values["latest_source_freshness_hours"] = primary_freshness["freshness_hours"] if primary_freshness else None
-    feature_values["history_days"] = history_days
+    feature_values["history_days"] = cpu_history_days
+    feature_values["requested_window_days"] = requested_window_days
+    feature_values["required_history_days"] = required_history_days
+    feature_values["telemetry_history_days"] = telemetry_history_days
+    feature_values["telemetry_coverage_ratio"] = telemetry_coverage_ratio
+    feature_values["cpu_history_days"] = cpu_history_days
+    feature_values["cpu_coverage_ratio"] = cpu_coverage_ratio
+    feature_values["minimum_history_coverage_ratio"] = settings.minimum_history_coverage_ratio
     feature_values["insufficient_data"] = insufficient_data
+    feature_values["insufficient_data_reasons"] = insufficient_reasons
     feature_values["business_hour_cpu_p95"] = percentile(business_hour_cpu, 0.95)
     feature_values["primary_source"] = primary_source
 
@@ -452,6 +479,20 @@ def generate_recommendation(
 
     def add_common_evidence() -> None:
         evidence.append(f"CPU p95 is {round(features.get('cpu_p95') or 0.0, 1)}%.")
+        coverage_source = "CPU telemetry" if features.get("cpu_history_days") else "Telemetry"
+        coverage_days = features.get("cpu_history_days") or features.get("telemetry_history_days") or 0.0
+        coverage_ratio = features.get("cpu_coverage_ratio") if features.get("cpu_history_days") else features.get("telemetry_coverage_ratio")
+        required_days = features.get("required_history_days") or features.get("requested_window_days")
+        if coverage_ratio is not None and required_days is not None:
+            coverage_status = (
+                "accepted"
+                if coverage_ratio >= features.get("minimum_history_coverage_ratio", 0.90)
+                else "insufficient"
+            )
+            evidence.append(
+                f"{coverage_source} coverage is {round(float(coverage_ratio) * 100.0, 1)}% "
+                f"({round(float(coverage_days), 2)} of {round(float(required_days), 2)} required days), {coverage_status}."
+            )
         if features.get("pressure_score") is not None:
             evidence.append(
                 f"Composite pressure score is {round(features['pressure_score'], 1)} ({features.get('pressure_band', 'unknown')})."
@@ -481,12 +522,14 @@ def generate_recommendation(
     add_common_evidence()
 
     if features["insufficient_data"]:
+        reasons = features.get("insufficient_data_reasons") or ["unknown"]
         guardrails.extend(
             [
                 "Do not change capacity until fresh primary-source data is available.",
                 "Re-run ingestion before the next review cycle.",
             ]
         )
+        evidence.insert(0, f"Insufficient data reason(s): {', '.join(reasons)}.")
         evidence.append("Recommendation is conservative because primary metrics are stale or history is too short.")
         return Recommendation(
             recommendation_id="",

@@ -1,0 +1,213 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1180" viewBox="0 0 1920 1180" role="img" aria-labelledby="title desc">
+  <title id="title">Agentic CoW Capacity Intelligence Architecture</title>
+  <desc id="desc">A WK-style architecture diagram for the implemented capacity intelligence application, including dashboard UI, FastAPI, guarded LangGraph agent, Azure OpenAI, Sumo Logic live ingestion, SQLite persistence, MCP server, and optional FAB Studio integration.</desc>
+  <defs>
+    <style>
+      .page { fill: #f3f6f9; }
+      .header { fill: #ffffff; stroke: #d8dee6; stroke-width: 1.5; }
+      .lane { fill: #ffffff; stroke: #d8dee6; stroke-width: 1.5; }
+      .lane-title { fill: #0067a6; font: 700 15px "Roboto", "Segoe UI", Arial, sans-serif; letter-spacing: .2px; }
+      .title { fill: #1f2933; font: 700 34px "Roboto", "Segoe UI", Arial, sans-serif; }
+      .subtitle { fill: #5f6b76; font: 400 16px "Roboto", "Segoe UI", Arial, sans-serif; }
+      .card { fill: #ffffff; stroke: #c8d1dc; stroke-width: 1.5; }
+      .card-blue { fill: #f4f9fc; stroke: #0067a6; }
+      .card-green { fill: #f4fbf7; stroke: #20724f; }
+      .card-yellow { fill: #fffaf0; stroke: #9a5b00; }
+      .card-red { fill: #fff6f5; stroke: #b42318; }
+      .card-muted { fill: #f8fafc; stroke: #8a98a8; }
+      .disabled { fill: #fafbfc; stroke: #aeb8c3; stroke-width: 1.5; stroke-dasharray: 7 6; }
+      .card-title { fill: #1f2933; font: 700 18px "Roboto", "Segoe UI", Arial, sans-serif; }
+      .text { fill: #344454; font: 400 13.5px "Roboto", "Segoe UI", Arial, sans-serif; }
+      .muted { fill: #5f6b76; font: 400 12.5px "Roboto", "Segoe UI", Arial, sans-serif; }
+      .label { fill: #0067a6; font: 700 11.5px "Roboto", "Segoe UI", Arial, sans-serif; letter-spacing: .3px; }
+      .pill { fill: #e5f1f8; stroke: #0067a6; stroke-width: 1; }
+      .pill-text { fill: #0067a6; font: 700 12px "Roboto", "Segoe UI", Arial, sans-serif; }
+      .dark-pill { fill: #0067a6; }
+      .dark-pill-text { fill: #ffffff; font: 700 12px "Roboto", "Segoe UI", Arial, sans-serif; }
+      .accent-blue { fill: #0067a6; }
+      .accent-green { fill: #20724f; }
+      .accent-yellow { fill: #9a5b00; }
+      .accent-red { fill: #b42318; }
+      .arrow { stroke: #0067a6; stroke-width: 2.6; fill: none; marker-end: url(#arrow); }
+      .arrow-soft { stroke: #7a8897; stroke-width: 2.2; fill: none; marker-end: url(#arrow-soft); }
+      .arrow-disabled { stroke: #9aa6b2; stroke-width: 2.2; fill: none; stroke-dasharray: 7 6; marker-end: url(#arrow-disabled); }
+      .thin { stroke-width: 1.8; }
+      .shadow { filter: url(#soft-shadow); }
+      .mini { fill: #5f6b76; font: 400 11.5px "Roboto", "Segoe UI", Arial, sans-serif; }
+    </style>
+    <filter id="soft-shadow" x="-8%" y="-10%" width="116%" height="124%">
+      <feDropShadow dx="0" dy="3" stdDeviation="3.5" flood-color="#102840" flood-opacity="0.10" />
+    </filter>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#0067a6" />
+    </marker>
+    <marker id="arrow-soft" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#7a8897" />
+    </marker>
+    <marker id="arrow-disabled" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#9aa6b2" />
+    </marker>
+  </defs>
+
+  <rect class="page" x="0" y="0" width="1920" height="1180" />
+
+  <rect class="header shadow" x="48" y="40" width="1824" height="112" rx="8" />
+  <image x="76" y="73" width="270" height="48" preserveAspectRatio="xMinYMid meet" href="data:image/png;base64,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" />
+  <text class="title" x="370" y="88">Agentic CoW Capacity Intelligence</text>
+  <text class="subtitle" x="370" y="119">Implemented architecture: pure Sumo live telemetry, guarded agent workflow, optional Azure OpenAI summaries, MCP/FAB integration, approvals, and telemetry-quality reporting.</text>
+  <rect class="dark-pill" x="1490" y="70" width="310" height="34" rx="17" />
+  <text class="dark-pill-text" x="1515" y="92">Current demo mode: Pure Sumo live</text>
+  <rect class="pill" x="1490" y="110" width="310" height="28" rx="14" />
+  <text class="pill-text" x="1512" y="129">LLM summaries optional via Azure OpenAI</text>
+
+  <!-- Lanes -->
+  <rect class="lane shadow" x="56" y="190" width="1808" height="170" rx="8" />
+  <text class="lane-title" x="84" y="223">USER EXPERIENCE</text>
+
+  <rect class="lane shadow" x="56" y="405" width="1808" height="300" rx="8" />
+  <text class="lane-title" x="84" y="438">APPLICATION, AGENT, AND INTEGRATION LAYER</text>
+
+  <rect class="lane shadow" x="56" y="750" width="1808" height="300" rx="8" />
+  <text class="lane-title" x="84" y="783">TELEMETRY, ANALYTICS, AND PERSISTENCE</text>
+
+  <!-- User Experience cards -->
+  <rect class="card card-blue shadow" x="96" y="245" width="320" height="86" rx="6" />
+  <rect class="accent-blue" x="96" y="245" width="5" height="86" rx="2" />
+  <text class="card-title" x="120" y="276">Dashboard UI</text>
+  <text class="text" x="120" y="301">Recommendation list, selected workload,</text>
+  <text class="text" x="120" y="321">Agent Assistant, workflow actions</text>
+
+  <rect class="card shadow" x="480" y="245" width="320" height="86" rx="6" />
+  <rect class="accent-green" x="480" y="245" width="5" height="86" rx="2" />
+  <text class="card-title" x="504" y="276">Engineer Actions</text>
+  <text class="text" x="504" y="301">Run cycle, force refresh/no cache,</text>
+  <text class="text" x="504" y="321">approve, reject, snooze</text>
+
+  <rect class="card card-red shadow" x="864" y="245" width="330" height="86" rx="6" />
+  <rect class="accent-red" x="864" y="245" width="5" height="86" rx="2" />
+  <text class="card-title" x="888" y="276">Insufficient Data Breakdown</text>
+  <text class="text" x="888" y="301">Missing CPU, short history, stale source,</text>
+  <text class="text" x="888" y="321">no primary source shown in summary tile</text>
+
+  <rect class="card card-muted shadow" x="1370" y="245" width="330" height="86" rx="6" />
+  <rect class="accent-blue" x="1370" y="245" width="5" height="86" rx="2" />
+  <text class="card-title" x="1394" y="276">MCP/FAB Entry Point</text>
+  <text class="text" x="1394" y="301">External agents can discover and call</text>
+  <text class="text" x="1394" y="321">the same backend tools via MCP</text>
+
+  <path class="arrow" d="M416 288 H480" />
+  <path class="arrow-soft" d="M800 288 H864" />
+  <path class="arrow-soft" d="M1194 288 H1370" />
+
+  <!-- App / Agent cards -->
+  <rect class="card card-blue shadow" x="96" y="470" width="305" height="170" rx="6" />
+  <rect class="accent-blue" x="96" y="470" width="5" height="170" rx="2" />
+  <text class="label" x="120" y="500">FASTAPI</text>
+  <text class="card-title" x="120" y="526">Application API</text>
+  <text class="text" x="120" y="555">/dashboard</text>
+  <text class="text" x="120" y="578">/api/resources</text>
+  <text class="text" x="120" y="601">/api/recommendations</text>
+  <text class="text" x="120" y="624">/api/reports/latest, /api/action-items</text>
+
+  <rect class="card card-blue shadow" x="465" y="470" width="315" height="170" rx="6" />
+  <rect class="accent-blue" x="465" y="470" width="5" height="170" rx="2" />
+  <text class="label" x="489" y="500">AGENT API</text>
+  <text class="card-title" x="489" y="526">/api/agent/ask</text>
+  <text class="text" x="489" y="555">LLM/Python answer mode</text>
+  <text class="text" x="489" y="578">Customer and "last N days" parsing</text>
+  <text class="text" x="489" y="601">Force refresh/no-cache path</text>
+  <text class="text" x="489" y="624">Stable idempotency when not forced</text>
+
+  <rect class="card card-green shadow" x="844" y="470" width="330" height="170" rx="6" />
+  <rect class="accent-green" x="844" y="470" width="5" height="170" rx="2" />
+  <text class="label" x="868" y="500">LANGGRAPH</text>
+  <text class="card-title" x="868" y="526">Guarded Agent Workflow</text>
+  <text class="text" x="868" y="555">Intent routing</text>
+  <text class="text" x="868" y="578">Controlled tool sequencing</text>
+  <text class="text" x="868" y="601">No accidental repeated tools</text>
+  <text class="text" x="868" y="624">Advisory-only response guardrails</text>
+
+  <rect class="card card-yellow shadow" x="1238" y="470" width="300" height="170" rx="6" />
+  <rect class="accent-yellow" x="1238" y="470" width="5" height="170" rx="2" />
+  <text class="label" x="1262" y="500">AZURE OPENAI / FOUNDRY</text>
+  <text class="card-title" x="1262" y="526">GPT-4.1 Deployment</text>
+  <text class="text" x="1262" y="555">Used when LLM mode is on</text>
+  <text class="text" x="1262" y="578">Receives trusted facts only</text>
+  <text class="text" x="1262" y="601">No direct capacity actions</text>
+
+  <rect class="card card-muted shadow" x="1602" y="470" width="220" height="170" rx="6" />
+  <rect class="accent-blue" x="1602" y="470" width="5" height="170" rx="2" />
+  <text class="label" x="1626" y="500">MCP SERVER</text>
+  <text class="card-title" x="1626" y="526">/mcp</text>
+  <text class="text" x="1626" y="555">Streamable HTTP</text>
+  <text class="text" x="1626" y="578">Bearer auth</text>
+  <text class="text" x="1626" y="601">Tool discovery</text>
+  <text class="text" x="1626" y="624">FAB-compatible</text>
+
+  <path class="arrow" d="M401 555 H465" />
+  <path class="arrow" d="M780 555 H844" />
+  <path class="arrow-soft" d="M1174 555 H1238" />
+  <path class="arrow-soft" d="M1538 555 H1602" />
+  <path class="arrow-soft" d="M1712 470 V331" />
+
+  <!-- Telemetry and persistence cards -->
+  <rect class="card card-green shadow" x="96" y="820" width="315" height="170" rx="6" />
+  <rect class="accent-green" x="96" y="820" width="5" height="170" rx="2" />
+  <text class="label" x="120" y="850">SERVICE LAYER</text>
+  <text class="card-title" x="120" y="876">Capacity Service</text>
+  <text class="text" x="120" y="905">Run orchestration and run history</text>
+  <text class="text" x="120" y="928">Scope filters and resource matching</text>
+  <text class="text" x="120" y="951">Approval/action item creation</text>
+  <text class="text" x="120" y="974">MCP tools reuse same service</text>
+
+  <rect class="card card-yellow shadow" x="475" y="820" width="300" height="170" rx="6" />
+  <rect class="accent-yellow" x="475" y="820" width="5" height="170" rx="2" />
+  <text class="label" x="499" y="850">TELEMETRY SOURCE</text>
+  <text class="card-title" x="499" y="876">Sumo Logic API</text>
+  <text class="text" x="499" y="905">Live API mode</text>
+  <text class="text" x="499" y="928">7-day query window</text>
+  <text class="text" x="499" y="951">19 metric query jobs</text>
+  <text class="text" x="499" y="974">Source category based metrics</text>
+
+  <rect class="disabled shadow" x="820" y="820" width="270" height="170" rx="6" />
+  <rect x="820" y="820" width="5" height="170" rx="2" fill="#8a98a8" />
+  <text class="label" x="844" y="850" fill="#5f6b76">DISABLED CONNECTORS</text>
+  <text class="card-title" x="844" y="876">Datadog / CloudWatch</text>
+  <text class="text" x="844" y="905">Disabled in .env</text>
+  <text class="text" x="844" y="928">No seeded sample resources</text>
+  <text class="text" x="844" y="951">Pure Sumo portfolio run</text>
+
+  <rect class="card card-green shadow" x="1135" y="820" width="315" height="170" rx="6" />
+  <rect class="accent-green" x="1135" y="820" width="5" height="170" rx="2" />
+  <text class="label" x="1159" y="850">ANALYTICS</text>
+  <text class="card-title" x="1159" y="876">Analysis Engine</text>
+  <text class="text" x="1159" y="905">Feature extraction</text>
+  <text class="text" x="1159" y="928">Coverage-ratio history checks</text>
+  <text class="text" x="1159" y="951">Scale up/down, watchlist, hold</text>
+  <text class="text" x="1159" y="974">Insufficient-data reason tracking</text>
+
+  <rect class="card card-blue shadow" x="1495" y="820" width="315" height="170" rx="6" />
+  <rect class="accent-blue" x="1495" y="820" width="5" height="170" rx="2" />
+  <text class="label" x="1519" y="850">PERSISTENCE</text>
+  <text class="card-title" x="1519" y="876">SQLite Capacity DB</text>
+  <text class="text" x="1519" y="905">Resources and normalized metrics</text>
+  <text class="text" x="1519" y="928">Runs, snapshots, reports</text>
+  <text class="text" x="1519" y="951">Recommendations and approvals</text>
+  <text class="text" x="1519" y="974">Action items and review history</text>
+
+  <path class="arrow" d="M1010 640 C1010 735 254 735 254 820" />
+  <path class="arrow" d="M411 905 H475" />
+  <path class="arrow-disabled" d="M775 905 H820" />
+  <path class="arrow" d="M775 866 C930 765 1065 765 1190 820" />
+  <path class="arrow" d="M1090 905 H1135" />
+  <path class="arrow" d="M1450 905 H1495" />
+  <path class="arrow-soft thin" d="M1652 820 C1665 710 1375 690 1388 640" />
+  <path class="arrow-soft thin" d="M254 820 C250 725 248 690 248 640" />
+
+  <!-- Operational rule strip -->
+  <rect class="card shadow" x="96" y="1068" width="1714" height="70" rx="6" />
+  <rect class="accent-blue" x="96" y="1068" width="5" height="70" rx="2" />
+  <text class="label" x="120" y="1095">IMPLEMENTED OPERATING RULES</text>
+  <text class="muted" x="120" y="1120">Normal runs use stable keys. Force refresh adds a refresh suffix. Analysis is advisory-only. Telemetry gaps are grouped by missing CPU, short history, stale source, and no primary source.</text>
+  <text class="muted" x="970" y="1120">MCP exposes the same ingestion, analysis, recommendation, report, and resource tools for FAB or another MCP client.</text>
+</svg>

@@ -11,6 +11,7 @@ const elements = {
   watchlistCount: document.querySelector("#watchlistCount"),
   holdCount: document.querySelector("#holdCount"),
   insufficientCount: document.querySelector("#insufficientCount"),
+  insufficientReasons: document.querySelector("#insufficientReasons"),
   portfolioSummary: document.querySelector("#portfolioSummary"),
   resultCount: document.querySelector("#resultCount"),
   actionItemCount: document.querySelector("#actionItemCount"),
@@ -59,6 +60,60 @@ function evidencePreview(item) {
   return (item.evidence_json || []).slice(0, 2).join(" ");
 }
 
+function insufficientReasonCounts(items) {
+  const reasons = {
+    "missing CPU": 0,
+    "short history": 0,
+    "stale source": 0,
+    "no primary source": 0,
+  };
+
+  items
+    .filter((item) => item.recommendation_type === "insufficient_data")
+    .forEach((item) => {
+      (item.evidence_json || []).forEach((entry) => {
+        const match = String(entry).match(/Insufficient data reason\(s\):\s*([^.]*)/i);
+        if (!match) {
+          return;
+        }
+        match[1]
+          .split(",")
+          .map((reason) => reason.trim())
+          .filter(Boolean)
+          .forEach((reason) => {
+            if (Object.prototype.hasOwnProperty.call(reasons, reason)) {
+              reasons[reason] += 1;
+            }
+          });
+      });
+    });
+
+  return reasons;
+}
+
+function renderInsufficientReasons(items) {
+  if (!elements.insufficientReasons) {
+    return;
+  }
+  const counts = insufficientReasonCounts(items);
+  const labels = [
+    ["missing CPU", "Missing CPU"],
+    ["short history", "Short history"],
+    ["stale source", "Stale source"],
+    ["no primary source", "No primary source"],
+  ];
+  elements.insufficientReasons.innerHTML = labels
+    .map(
+      ([key, label]) => `
+        <div>
+          <dt>${label}</dt>
+          <dd>${counts[key] || 0}</dd>
+        </div>
+      `
+    )
+    .join("");
+}
+
 function matchesFilters(item) {
   const search = elements.search.value.trim().toLowerCase();
   const haystack = [
@@ -91,6 +146,7 @@ function renderSummary(report) {
   elements.watchlistCount.textContent = counts.watchlist || 0;
   elements.holdCount.textContent = counts.hold || 0;
   elements.insufficientCount.textContent = counts.insufficient_data || 0;
+  renderInsufficientReasons(production);
   elements.portfolioSummary.textContent = report?.summary_text || "No scored report has been generated yet.";
 
 }

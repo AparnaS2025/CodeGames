@@ -36,6 +36,12 @@
           <span class="tile-label">Insufficient Data</span>
           <strong id="insufficientCount">-</strong>
           <small>telemetry gaps to close</small>
+          <dl class="reason-breakdown" id="insufficientReasons" aria-label="Insufficient data reasons">
+            <div><dt>Missing CPU</dt><dd>-</dd></div>
+            <div><dt>Short history</dt><dd>-</dd></div>
+            <div><dt>Stale source</dt><dd>-</dd></div>
+            <div><dt>No primary source</dt><dd>-</dd></div>
+          </dl>
         </article>
       </section>
 
@@ -175,11 +181,12 @@
             </div>
           </div>
           <div class="agent-body">
-            <div class="agent-prompts" aria-label="Suggested prompts">
-              <button type="button" data-agent-prompt="Run the full capacity cycle">Run cycle</button>
-              <button type="button" data-agent-prompt="Show me the latest report">Latest report</button>
-              <button type="button" data-agent-prompt="Summarize scale up recommendations">Scale up</button>
-            </div>
+              <div class="agent-prompts" aria-label="Suggested prompts">
+                <button type="button" data-agent-prompt="Run the full capacity cycle">Run cycle</button>
+                <button type="button" data-agent-prompt="Force refresh Chevron for last 7 days with no cache">Force refresh</button>
+                <button type="button" data-agent-prompt="Show me the latest report">Latest report</button>
+                <button type="button" data-agent-prompt="Summarize scale up recommendations">Scale up</button>
+              </div>
             <label class="agent-query-label">
               Ask
               <textarea id="agentQuery" rows="3" placeholder="Ask for a capacity cycle, latest report, or recommendation explanation."></textarea>
